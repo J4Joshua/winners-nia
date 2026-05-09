@@ -30,12 +30,17 @@ def build_train_parser() -> argparse.ArgumentParser:
         default=None,
         help="Apply batch_size / num_workers / compile for your GPU",
     )
-    p.add_argument("--epochs", type=int, default=30)
-    p.add_argument("--batch-size", type=int, default=512)
+    p.add_argument("--epochs", type=int, default=100,
+                   help="100 epochs ≈ 15–30 min on H100. More = better genre clustering.")
+    p.add_argument("--batch-size", type=int, default=512,
+                   help="Larger batches = more SupCon positives per step = better training")
     p.add_argument("--lr", type=float, default=3e-4)
     p.add_argument("--weight-decay", type=float, default=1e-2)
-    p.add_argument("--tau", type=float, default=0.07, help="InfoNCE temperature")
-    p.add_argument("--dropout", type=float, default=0.1)
+    p.add_argument("--tau", type=float, default=0.07,
+                   help="SupCon temperature (0.07 standard; try 0.05 for tighter clusters)")
+    p.add_argument("--noise-std", type=float, default=0.04,
+                   help="Gaussian noise std on audio scalar augmentation (0 = disable)")
+    p.add_argument("--dropout", type=float, default=0.15)
     p.add_argument("--warmup-frac", type=float, default=0.05)
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--val-fraction", type=float, default=0.10)

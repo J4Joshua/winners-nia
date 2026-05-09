@@ -21,28 +21,28 @@ GPU_PRESETS: dict[str, GpuPreset] = {
         batch_size=2048,
         num_workers=8,
         compile_model=True,
-        description="NVIDIA H100 80GB — recommended for hackathon speed (~5–10 min)",
+        description="NVIDIA H100 80GB — 100 epochs ≈ 10–15 min; SupCon loves large batches",
     ),
     "a100": GpuPreset(
         key="a100",
         batch_size=1024,
         num_workers=8,
         compile_model=True,
-        description="NVIDIA A100 40/80GB — strong balance (~8–15 min)",
+        description="NVIDIA A100 40/80GB — 100 epochs ≈ 20–30 min",
     ),
     "4090": GpuPreset(
         key="4090",
         batch_size=512,
         num_workers=4,
         compile_model=False,
-        description="RTX 4090 24GB — default consumer GPU (~20–40 min)",
+        description="RTX 4090 24GB — 100 epochs ≈ 40–60 min",
     ),
     "l4": GpuPreset(
         key="l4",
         batch_size=256,
         num_workers=4,
         compile_model=False,
-        description="NVIDIA L4 24GB — serverless-friendly (~30–60 min)",
+        description="NVIDIA L4 24GB — 100 epochs ≈ 60–90 min",
     ),
 }
 

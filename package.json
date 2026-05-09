@@ -1,0 +1,14 @@
+{
+  "name": "attune",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "convex": "npx convex dev"
+  },
+  "dependencies": {
+    "convex": "^1.38.0"
+  },
+  "devDependencies": {
+    "typescript": "~5.8.0"
+  }
+}

@@ -14,7 +14,7 @@ import torch
 import torch.nn as nn
 from torch.utils.data import ConcatDataset, DataLoader
 
-from ml.models.song_tower import SongTower, info_nce_loss
+from ml.models.song_tower import SongTower, augment_features, supcon_loss
 from ml.training.dataset import SpotifyTracksDataset, load_spotify_dataset
 from ml.export.push_to_hub import push_song_tower
 
@@ -61,18 +61,36 @@ def train_one_epoch(
     device: torch.device,
     tau: float,
     use_amp: bool,
+    noise_std: float = 0.04,
 ) -> float:
+    """
+    SupCon training with two augmented views per sample.
+
+    For each batch (x, genre_labels):
+      - view1 = model(augment(x))          — noisy audio scalars + dropout
+      - view2 = model(augment(x))          — different noise + dropout
+      - concat both views, repeat labels
+      - SupCon loss: all same-genre pairs in the 2B-sample batch are positives
+
+    With batch_size=512 and 19 genres, each anchor has ~50 positives on average.
+    """
     model.train()
     total_loss = 0.0
 
-    for x, _ in loader:
+    for x, genre_labels in loader:
         x = x.to(device, non_blocking=True)
+        genre_labels = genre_labels.to(device, non_blocking=True)
+
         optimizer.zero_grad(set_to_none=True)
 
         with torch.amp.autocast("cuda", enabled=use_amp):
-            anchor = model(x)
-            positive = model(x)
-            loss = info_nce_loss(anchor, positive, temperature=tau)
+            # Two independently augmented views (different noise + dropout)
+            v1 = model(augment_features(x, noise_std))
+            v2 = model(augment_features(x, noise_std))
+            # Concatenate both views; labels repeat to match
+            z = torch.cat([v1, v2], dim=0)
+            labels_2x = torch.cat([genre_labels, genre_labels], dim=0)
+            loss = supcon_loss(z, labels_2x, temperature=tau)
 
         scaler.scale(loss).backward()
         scaler.unscale_(optimizer)
@@ -94,15 +112,19 @@ def evaluate(
     tau: float,
     use_amp: bool,
 ) -> float:
+    """Validation: SupCon on clean features (no noise, eval mode dropout off)."""
     model.eval()
     total_loss = 0.0
 
-    for x, _ in loader:
+    for x, genre_labels in loader:
         x = x.to(device, non_blocking=True)
+        genre_labels = genre_labels.to(device, non_blocking=True)
         with torch.amp.autocast("cuda", enabled=use_amp):
-            anchor = model(x)
-            positive = model(x)
-            loss = info_nce_loss(anchor, positive, temperature=tau)
+            z = model(x)
+            # Duplicate to form two "views" so SupCon can compute cross-view positives
+            z2 = torch.cat([z, z], dim=0)
+            labels_2x = torch.cat([genre_labels, genre_labels], dim=0)
+            loss = supcon_loss(z2, labels_2x, temperature=tau)
         total_loss += loss.item()
 
     return total_loss / len(loader)
@@ -177,7 +199,7 @@ def export_embeddings(
     )
 
     chunks: list[torch.Tensor] = []
-    for x, _ in loader:
+    for x, _genre in loader:
         x = x.to(device)
         chunks.append(inner(x).cpu())
 
@@ -202,7 +224,8 @@ def export_torchscript(model: nn.Module, output_dir: Path, device: torch.device)
     # Warm up torch.compile once here at export time (single forward, no CUDAGraph issue).
     if hasattr(torch, "compile"):
         inner = torch.compile(inner, mode="reduce-overhead")  # type: ignore[assignment]
-    example = torch.zeros(1, 26, device=device)
+    from ml.training.dataset import SONG_FEATURE_DIM
+    example = torch.zeros(1, SONG_FEATURE_DIM, device=device)
     with torch.no_grad():
         inner(example)  # trigger compile
     scripted = torch.jit.trace(_unwrap_for_export(inner), example)
@@ -256,7 +279,7 @@ def run_training(args: Namespace) -> None:
     # torch.compile is intentionally skipped during training.
     # InfoNCE calls model(x) twice per batch; torch.compile with CUDAGraphs aliases the two
     # output buffers, causing "tensor output of CUDAGraphs overwritten" on any PyTorch build.
-    # For a 26→256→128 MLP the kernel overhead is negligible — AMP + H100 is already fast.
+    # For this MLP the kernel overhead is negligible — AMP + H100 is already fast.
     # Compile is applied to the unwrapped model at export time (export_torchscript).
     if args.compile:
         print("Note: --compile is ignored during training (applied at export). See engine.py.")
@@ -287,7 +310,8 @@ def run_training(args: Namespace) -> None:
         t0 = time.time()
 
         train_loss = train_one_epoch(
-            model, train_loader, optimizer, scheduler, scaler, device, args.tau, use_amp
+            model, train_loader, optimizer, scheduler, scaler, device, args.tau, use_amp,
+            noise_std=getattr(args, "noise_std", 0.04),
         )
         val_loss = evaluate(model, val_loader, device, args.tau, use_amp)
 

@@ -1,3 +1,16 @@
 ml/cli/my_user.json
 
 __pycache__/
+*.pyc
+.venv/
+*.egg-info/
+data/
+ml/export/
+
+node_modules/
+.expo/
+dist/
+.env.local
+.env*.local
+
+convex/_generated/

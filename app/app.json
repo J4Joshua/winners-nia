@@ -1,0 +1,45 @@
+{
+  "expo": {
+    "name": "Attune",
+    "slug": "attune",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "icon": "./assets/icon.png",
+    "scheme": "attune",
+    "userInterfaceStyle": "automatic",
+    "newArchEnabled": true,
+    "ios": {
+      "supportsTablet": false,
+      "bundleIdentifier": "com.attune.app",
+      "infoPlist": {
+        "NSLocationWhenInUseUsageDescription": "Attune uses your location to recommend music for your current environment (home, gym, transit)."
+      }
+    },
+    "android": {
+      "adaptiveIcon": {
+        "foregroundImage": "./assets/adaptive-icon.png",
+        "backgroundColor": "#000000"
+      },
+      "package": "com.attune.app",
+      "permissions": ["ACCESS_COARSE_LOCATION"]
+    },
+    "web": {
+      "bundler": "metro",
+      "output": "static",
+      "favicon": "./assets/favicon.png"
+    },
+    "plugins": [
+      "expo-router",
+      "expo-haptics",
+      [
+        "expo-auth-session",
+        {
+          "associatedDomains": []
+        }
+      ]
+    ],
+    "experiments": {
+      "typedRoutes": true
+    }
+  }
+}

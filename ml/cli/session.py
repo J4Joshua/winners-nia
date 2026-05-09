@@ -60,30 +60,47 @@ DEFAULT_TOWER = Path("ml/export/my_user_tower.pt")
 
 def _vibe_to_song_features(vibe_name: str) -> np.ndarray:
     """
-    Convert a 17-d vibe profile → 26-d Song Tower input.
+    Convert a 17-d vibe profile → 45-d Song Tower input.
 
-    The Song Tower was trained on song-level audio features (26-d).
-    We map the vibe's audio scalars into the same slots so the Song Tower
-    can project the vibe into its own embedding space — that's the only
-    space where vibe shifting is meaningful.
-
-    Vibe profile layout:  [0]dance [1]energy [2]valence [3]acoustic
-                          [4]instr [5]tempo_norm [6]loudness_norm …
-    Song Tower layout:    [12]dance [13]energy [15]acoustic [16]instr
-                          [18]valence [19]loudness [20]tempo …
+    Layout:
+      [0:12]   key one-hot  (left at zeros — vibe has no key preference)
+      [12:26]  audio scalars mapped from vibe profile
+      [26:45]  19-d macro-genre one-hot based on vibe→genre mapping
     """
+    from ml.training.dataset import GENRE_TO_MACRO, NUM_MACRO_GENRES, SONG_FEATURE_DIM
+
+    # Vibe name → macro-genre index for the genre one-hot
+    _VIBE_MACRO: dict[str, int] = {
+        "pop": 0, "happy": 0, "morning": 0,
+        "rock": 1, "workout": 1,
+        "hype": 4, "party": 4, "late-night": 4,
+        "rap": 5,
+        "rnb": 6,
+        "jazz": 7,
+        "classical": 8, "chill": 8, "rainy": 8, "sad": 8,
+        "focus": 8, "sleep": 8,
+        "metal": 9,
+    }
+
     vv = list(DEMO_USERS[vibe_name]["features"])
-    vec = np.zeros(26, dtype=np.float32)
-    vec[12] = vv[0]   # danceability
-    vec[13] = vv[1]   # energy
-    vec[15] = vv[3]   # acousticness
-    vec[16] = vv[4]   # instrumentalness
-    vec[18] = vv[2]   # valence
+    vec = np.zeros(SONG_FEATURE_DIM, dtype=np.float32)
+
+    # Audio scalars (indices 12-25)
+    vec[12] = vv[0]               # danceability
+    vec[13] = vv[1]               # energy
+    vec[15] = vv[3]               # acousticness
+    vec[16] = vv[4]               # instrumentalness
+    vec[18] = vv[2]               # valence
     vec[19] = vv[6] if len(vv) > 6 else 0.5  # loudness_norm
-    vec[20] = vv[5]   # tempo_norm
-    vec[23] = 0.5     # popularity (neutral)
-    vec[24] = 0.5     # duration (neutral)
-    vec[25] = 4.0 / 7.0  # time_signature (4/4 most common)
+    vec[20] = vv[5]               # tempo_norm
+    vec[23] = 0.5                 # popularity (neutral)
+    vec[24] = 0.5                 # duration (neutral)
+    vec[25] = 4.0 / 7.0          # time_signature (4/4)
+
+    # Genre one-hot (indices 26-44)
+    macro = _VIBE_MACRO.get(vibe_name, NUM_MACRO_GENRES - 1)  # default "other"
+    vec[26 + macro] = 1.0
+
     return vec
 
 
@@ -128,14 +145,18 @@ class SessionState:
         parts = [p for p in [self.context_time, self.context_vibe] if p]
         return " + ".join(parts) if parts else "none"
 
-    def _user_embedding(self) -> np.ndarray:
-        """Raw user embedding — context applied separately in _query()."""
+    def _ctx_features(self) -> list[float]:
+        """17-d user feature vector with time context applied."""
         feats = list(self.base_features)
         if self.context_time:
             h = TIME_HOURS.get(self.context_time, 14)
             feats[IDX_PEAK_SIN] = math.sin(2 * math.pi * h / 24)
             feats[IDX_PEAK_COS] = math.cos(2 * math.pi * h / 24)
-        x = torch.tensor([feats], dtype=torch.float32, device=self.device)
+        return feats
+
+    def _user_embedding(self) -> np.ndarray:
+        """Raw user embedding with time context applied."""
+        x = torch.tensor([self._ctx_features()], dtype=torch.float32, device=self.device)
         self.user_tower.eval()
         with torch.no_grad():
             return self.user_tower(x).cpu().numpy()[0].astype(np.float32)
@@ -376,7 +397,7 @@ def _build_app(
                     user_json=str(DEFAULT_JSON),
                     output=str(DEFAULT_TOWER),
                     hub_repo=None, embeddings=None, ids=None,
-                    positives="all", epochs=500, lr=5e-3,
+                    positives="all", epochs=2000, lr=5e-3,
                     seed=42, min_positives=3,
                     cpu=device.type == "cpu",
                 ))
