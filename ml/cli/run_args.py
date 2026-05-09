@@ -58,6 +58,20 @@ def build_run_parser(prog: str | None = None) -> argparse.ArgumentParser:
         metavar="TOKEN",
         help="Spotify Bearer token to resolve track IDs → names (or set SPOTIFY_TOKEN env var)",
     )
+    p.add_argument(
+        "--client-id",
+        type=str,
+        default=None,
+        metavar="ID",
+        help="Spotify app client ID — auto-fetches token via client-credentials (or SPOTIFY_CLIENT_ID)",
+    )
+    p.add_argument(
+        "--client-secret",
+        type=str,
+        default=None,
+        metavar="SECRET",
+        help="Spotify app client secret (or SPOTIFY_CLIENT_SECRET)",
+    )
     return p
 
 

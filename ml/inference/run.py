@@ -54,11 +54,24 @@ def run_inference(args: Namespace) -> None:
     search_ms = (time.perf_counter() - t0) * 1000
 
     # Optionally resolve track IDs → "Title — Artist" via Spotify API
+    import os
     spotify_token = getattr(args, "spotify_token", None)
+    client_id = getattr(args, "client_id", None)
+    client_secret = getattr(args, "client_secret", None)
     names: dict[str, str] = {}
-    if spotify_token or __import__("os").environ.get("SPOTIFY_TOKEN"):
+    wants_names = (
+        spotify_token
+        or os.environ.get("SPOTIFY_TOKEN")
+        or client_id or os.environ.get("SPOTIFY_CLIENT_ID")
+    )
+    if wants_names:
         from ml.cli.spotify_tracks import resolve_track_names
-        names = resolve_track_names([tid for tid, _ in results], token=spotify_token)
+        names = resolve_track_names(
+            [tid for tid, _ in results],
+            token=spotify_token,
+            client_id=client_id,
+            client_secret=client_secret,
+        )
 
     has_names = bool(names)
     col_w = 52 if has_names else 0
