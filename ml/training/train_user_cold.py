@@ -40,10 +40,18 @@ def resolve_positive_ids(profile: dict, prefer: str) -> list[str]:
         return [str(x) for x in profile.get("top_track_ids") or []]
     if prefer == "recent":
         return [str(x) for x in profile.get("recent_track_ids") or []]
-    combined = list(profile.get("top_track_ids") or []) + list(profile.get("recent_track_ids") or [])
+    if prefer == "liked":
+        return [str(x) for x in profile.get("liked_track_ids") or []]
+
+    # "all": top + recent + liked, deduplicated, order preserved
+    sources = (
+        list(profile.get("top_track_ids") or [])
+        + list(profile.get("recent_track_ids") or [])
+        + list(profile.get("liked_track_ids") or [])
+    )
     out: list[str] = []
     seen: set[str] = set()
-    for x in combined:
+    for x in sources:
         s = str(x)
         if s not in seen:
             seen.add(s)
@@ -62,7 +70,7 @@ def train_user_cold(args: argparse.Namespace) -> None:
     if len(positive_ids) < args.min_positives:
         raise SystemExit(
             f"Need at least {args.min_positives} track IDs in profile (top_track_ids / recent). "
-            "Re-run: python -m ml spotify --token ... --out ml/cli/my_user.json"
+            "Re-run: python -m ml spotify --client-id ... --client-secret ... --out ml/cli/my_user.json"
         )
 
     if args.embeddings and args.ids:
@@ -135,7 +143,7 @@ def parse_train_user_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--hub-repo", default=None, help="HF model repo with song_embeddings_v1.npy + song_ids_v1.npy")
     p.add_argument("--embeddings", default=None, help="Local song_embeddings_v1.npy (optional)")
     p.add_argument("--ids", default=None, help="Local song_ids_v1.npy (optional)")
-    p.add_argument("--positives", choices=("top", "recent", "both"), default="top", help="Which Spotify IDs supervise")
+    p.add_argument("--positives", choices=("top", "recent", "liked", "all"), default="all", help="Which Spotify IDs supervise the User Tower (default: all)")
     p.add_argument("--epochs", type=int, default=500)
     p.add_argument("--lr", type=float, default=5e-3)
     p.add_argument("--seed", type=int, default=42)

@@ -10,17 +10,16 @@ def _usage() -> str:
     return """\
 Attune ML (PyTorch)
 
-  python -m ml train   --gpu-preset h100 ...
-  python -m ml run     --song-tower ml/export/song_tower_v1.pt ...
-  python -m ml faiss   --embeddings ml/export/song_embeddings_v1.npy ...
-  python -m ml hub     --repo-id ORG/name --output-dir ml/export
+  python -m ml train      --gpu-preset h100 ...
+  python -m ml run        --vibe chill
+  python -m ml session    --user-json ml/cli/my_user.json --user-tower ml/export/my_user_tower.pt
+  python -m ml faiss      --embeddings ml/export/song_embeddings_v1.npy ...
+  python -m ml hub        --repo-id ORG/name --output-dir ml/export
   python -m ml train-user --user-json ml/cli/my_user.json ...
-  python -m ml spotify --token ... --out ml/cli/my_user.json
+  python -m ml spotify    --client-id ... --client-secret ...
 
-Subcommands match modules; legacy entrypoints still work:
-
-  python -m ml.training.train_song_tower
-  python -m ml.cli.test_user  (same as `ml run`)
+`ml session` opens an interactive TUI:
+  ↑↓ navigate · l like · d dislike · c vibe · t time · s save · q quit
 """
 
 
@@ -89,6 +88,20 @@ def main(argv: list[str] | None = None) -> None:
 
         args = parse_spotify_args(rest)
         run_spotify_profile(args)
+        return
+
+    if cmd == "session":
+        import argparse
+        from ml.cli.session import run_session
+        from ml.inference.demo_users import DEMO_USERS
+
+        p = argparse.ArgumentParser(prog="ml session", description="Interactive Attune TUI")
+        p.add_argument("--user-json", required=True, help="Profile JSON from `ml spotify`")
+        p.add_argument("--user-tower", required=True, help="User Tower checkpoint (.pt)")
+        p.add_argument("--hub-repo", default=None, help="HF repo (default: MrlolDev/attune-v0)")
+        p.add_argument("--top-k", type=int, default=20, help="Songs to show")
+        p.add_argument("--device", default=None)
+        run_session(p.parse_args(rest))
         return
 
     print(f"Unknown command: {cmd!r}\n", file=sys.stderr)

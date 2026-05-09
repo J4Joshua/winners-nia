@@ -145,6 +145,7 @@ def compute_user_features(
     display_name: str = "",
     *,
     genre_diversity_score: float | None = None,
+    liked_track_ids: list[str] | None = None,
 ) -> dict:
     valid_af = [af for af in audio_features if af and af.get("danceability") is not None]
 
@@ -259,6 +260,7 @@ def compute_user_features(
         "features": features,
         "top_track_ids": top_track_ids,
         "recent_track_ids": recent_track_ids,
+        "liked_track_ids": liked_track_ids or [],
         "debug": {
             "mean_danceability": round(mean_danceability, 3),
             "mean_energy": round(mean_energy, 3),
@@ -329,6 +331,33 @@ def fetch_with_token(token: str) -> dict:
     }
 
 
+def fetch_liked_tracks_http(access_token: str, limit: int = 2000) -> list[str]:
+    """
+    Paginate GET /v1/me/tracks → return list of track IDs.
+    Requires user-library-read scope. Returns up to `limit` IDs.
+    """
+    import urllib.error
+    import urllib.request
+    import json as _json
+
+    ids: list[str] = []
+    url: str | None = f"https://api.spotify.com/v1/me/tracks?limit=50"
+    while url and len(ids) < limit:
+        req = urllib.request.Request(url, headers={"Authorization": f"Bearer {access_token}"})
+        try:
+            with urllib.request.urlopen(req, timeout=15) as r:
+                body = _json.loads(r.read().decode())
+        except (urllib.error.HTTPError, urllib.error.URLError, OSError) as exc:
+            print(f"  Warning: liked tracks fetch failed: {exc}")
+            break
+        for item in body.get("items") or []:
+            track = item.get("track") if isinstance(item, dict) else None
+            if isinstance(track, dict) and track.get("id"):
+                ids.append(str(track["id"]))
+        url = body.get("next")  # None when no more pages
+    return ids[:limit]
+
+
 def fetch_with_oauth(client_id: str, client_secret: str, redirect_uri: str) -> dict:
     try:
         import spotipy  # type: ignore
@@ -339,7 +368,7 @@ def fetch_with_oauth(client_id: str, client_secret: str, redirect_uri: str) -> d
             "Or obtain a user access token via OAuth (see https://developer.spotify.com/documentation/web-api/tutorials/code-flow)"
         )
 
-    scope = "user-top-read user-read-recently-played"
+    scope = "user-top-read user-read-recently-played user-library-read"
     sp = spotipy.Spotify(
         auth_manager=SpotifyOAuth(
             client_id=client_id,
@@ -377,12 +406,17 @@ def fetch_with_oauth(client_id: str, client_secret: str, redirect_uri: str) -> d
     recent_tracks = recent_resp.get("items", [])
     print(f"  → {len(recent_tracks)} plays")
 
+    print("Fetching liked songs (up to 2000) ...")
+    liked_track_ids = fetch_liked_tracks_http(spotify_access_token(sp), limit=2000)
+    print(f"  → {len(liked_track_ids)} liked tracks")
+
     return {
         "display_name": display_name,
         "top_tracks": top_tracks,
         "audio_features": audio_features,
         "recent_tracks": recent_tracks,
         "genre_diversity_score": genre_div,
+        "liked_track_ids": liked_track_ids,
     }
 
 
@@ -432,6 +466,7 @@ def run_spotify_profile(args: argparse.Namespace) -> None:
         recent_tracks=data["recent_tracks"],
         display_name=data.get("display_name", ""),
         genre_diversity_score=data.get("genre_diversity_score"),
+        liked_track_ids=data.get("liked_track_ids"),
     )
 
     out_path = Path(args.out)

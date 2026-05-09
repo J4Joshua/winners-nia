@@ -19,3 +19,9 @@ faiss-cpu>=1.8.0
 
 # Progress bars / display
 tqdm>=4.66.0
+
+# Spotify OAuth (profile fetching)
+spotipy>=2.23.0
+
+# Interactive TUI session (ml session)
+textual>=0.80.0
