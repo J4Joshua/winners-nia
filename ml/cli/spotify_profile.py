@@ -121,9 +121,21 @@ def compute_user_features(
         account_age_norm,
     ]
 
+    top_track_ids = [str(t.get("id")) for t in top_tracks if t.get("id")]
+    recent_track_ids: list[str] = []
+    seen_recent: set[str] = set()
+    for item in recent_tracks:
+        tr = item.get("track") or {}
+        tid = tr.get("id") if isinstance(tr, dict) else None
+        if tid and str(tid) not in seen_recent:
+            seen_recent.add(str(tid))
+            recent_track_ids.append(str(tid))
+
     return {
         "name": display_name or "Spotify User",
         "features": features,
+        "top_track_ids": top_track_ids,
+        "recent_track_ids": recent_track_ids,
         "debug": {
             "mean_danceability": round(mean_danceability, 3),
             "mean_energy": round(mean_energy, 3),
@@ -278,11 +290,9 @@ def run_spotify_profile(args: argparse.Namespace) -> None:
     for k, v in profile["debug"].items():
         print(f"  {k:<30} {v}")
 
-    print("\nThen:")
-    print(f"  python -m ml run --song-tower ml/export/song_tower_v1.pt \\")
-    print(f"      --embeddings ml/export/song_embeddings_v1.npy \\")
-    print(f"      --ids ml/export/song_ids_v1.npy \\")
-    print(f"      --user-json {args.out}")
+    print("\nThen cold-train User Tower + run:")
+    print(f"  python -m ml train-user --user-json {args.out} --output ml/export/my_user_tower.pt")
+    print(f"  python -m ml run --user-json {args.out} --user-tower ml/export/my_user_tower.pt")
 
 
 def main() -> None:

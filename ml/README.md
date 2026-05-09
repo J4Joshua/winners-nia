@@ -35,7 +35,22 @@ Training code needs **PyTorch 2.2+** (`torch.amp`, optional `torch.compile`). Re
 
 Files: `ml/requirements.txt` (includes torch for laptop/bare venv), `ml/requirements-train-extras.txt` (no torch — for RunPod).
 
-Pod workflow:
+### Tokens (where to get them)
+
+| Token | Used for | Where |
+|-------|-----------|--------|
+| **Spotify access token** | `python -m ml spotify --token ...` | Easiest: open [Spotify Web API Console](https://developer.spotify.com/console/get-users-top-artists-and-tracks/) (or “recently played”), click **Get Token**, enable scopes **`user-top-read`** and **`user-read-recently-played`**, copy the **Bearer** token. Tokens expire (~1 hour); for long-lived use create an app in the [Developer Dashboard](https://developer.spotify.com/dashboard) and use OAuth / `spotipy` (`ml spotify --client-id ...`). |
+| **`HF_TOKEN`** (Hugging Face) | Uploading models (`ml train --push-to-hub`), gated datasets, Hub downloads if needed | [huggingface.co/settings/tokens](https://huggingface.co/settings/tokens) — create a token with **write** if you push models. |
+
+These are **different** products: Spotify proves *your listening account*; Hugging Face proves *your HF account*.
+
+### Weather and “context”
+
+The **full Attune design** uses a separate **Context Encoder** (time, location buckets, **weather**, skips, etc.) that *shifts* the user vector before search. That model is **not implemented** in this repo yet—only **Song Tower** + **User Tower** (17-d profile → 128-d). So you **cannot** pass weather into `ml run` today and get a context-conditioned embedding from this package.
+
+What you *can* do now: train a **User Tower** that matches **your** Spotify taste (cold start), then run retrieval and inspect printed track IDs.
+
+### GPU pod — Song Tower train
 
 ```bash
 cd /path/to/winners-nia
@@ -54,7 +69,8 @@ All commands are `python -m ml <subcommand> ...` from the repository root.
 | `run` | Load artifacts (local or Hub), embed user profile, nearest-neighbor search over the catalog |
 | `faiss` | Build `IndexFlatIP` from exported embeddings |
 | `hub` | Upload `ml/export/` artifacts to a Hugging Face **model** repo |
-| `spotify` | Pull your top/recent tracks via Web API → write `my_user.json` (17-d features) |
+| `train-user` | Cold-start **User Tower** from `ml spotify` JSON + Song embeddings (Hub or local) |
+| `spotify` | Pull your top/recent tracks via Web API → write `my_user.json` (17-d features + track IDs) |
 
 ```bash
 python -m ml                    # usage
@@ -80,8 +96,11 @@ That downloads `song_tower_v1.pt`, `song_embeddings_v1.npy`, and `song_ids_v1.np
 
 ```bash
 python -m ml spotify --token "YOUR_BEARER_TOKEN" --out ml/cli/my_user.json
-python -m ml run --user-json ml/cli/my_user.json --top-k 20
+python -m ml train-user --user-json ml/cli/my_user.json --output ml/export/my_user_tower.pt
+python -m ml run --user-json ml/cli/my_user.json --user-tower ml/export/my_user_tower.pt --top-k 20
 ```
+
+`train-user` aligns your User Tower embedding to the **average Song embedding** of your **top tracks** that appear in the HF catalog (`top_track_ids` in the JSON). If many IDs are missing from the catalog, training may fail—increase overlap by using the same track universe as the Song Tower training set.
 
 Optional: `--hub-repo MrlolDev/attune-v0` (same as the default) or another repo. For local files instead of Hub, use `--song-tower`, `--embeddings`, and `--ids` together.
 

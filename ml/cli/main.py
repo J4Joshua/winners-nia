@@ -14,6 +14,7 @@ Attune ML (PyTorch)
   python -m ml run     --song-tower ml/export/song_tower_v1.pt ...
   python -m ml faiss   --embeddings ml/export/song_embeddings_v1.npy ...
   python -m ml hub     --repo-id ORG/name --output-dir ml/export
+  python -m ml train-user --user-json ml/cli/my_user.json ...
   python -m ml spotify --token ... --out ml/cli/my_user.json
 
 Subcommands match modules; legacy entrypoints still work:
@@ -76,6 +77,13 @@ def main(argv: list[str] | None = None) -> None:
         push_song_tower(ha.repo_id, ha.output_dir, token=token, private=ha.private)
         return
 
+    if cmd == "train-user":
+        from ml.training.train_user_cold import parse_train_user_args, train_user_cold
+
+        args = parse_train_user_args(rest)
+        train_user_cold(args)
+        return
+
     if cmd == "spotify":
         from ml.cli.spotify_profile import parse_spotify_args, run_spotify_profile
 
@@ -83,9 +91,7 @@ def main(argv: list[str] | None = None) -> None:
         run_spotify_profile(args)
         return
 
-    print(f"Unknown command: {cmd}\n", file=sys.stderr)
-    print(_usage(), file=sys.stderr)
-    sys.exit(1)
+    print(f"Unknown command: {cmd!r}\n", file=sys.stderr)
 
 
 if __name__ == "__main__":
