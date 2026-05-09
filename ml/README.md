@@ -39,10 +39,14 @@ Files: `ml/requirements.txt` (includes torch for laptop/bare venv), `ml/requirem
 
 | Token | Used for | Where |
 |-------|-----------|--------|
-| **Spotify access token** | `python -m ml spotify --token ...` | Easiest: open [Spotify Web API Console](https://developer.spotify.com/console/get-users-top-artists-and-tracks/) (or “recently played”), click **Get Token**, enable scopes **`user-top-read`** and **`user-read-recently-played`**, copy the **Bearer** token. Tokens expire (~1 hour); for long-lived use create an app in the [Developer Dashboard](https://developer.spotify.com/dashboard) and use OAuth / `spotipy` (`ml spotify --client-id ...`). |
+| **Spotify access token** | `python -m ml spotify` | Spotify removed the old **Web API Console** “Get Token” pages. Use either: **(A)** [Developer Dashboard](https://developer.spotify.com/dashboard) → create an app → **Settings** → add a **Redirect URI** that matches `--redirect-uri` (default `http://127.0.0.1:8888/callback` or `http://localhost:8888/callback`) → `pip install spotipy` → `python -m ml spotify --client-id … --client-secret …` (opens browser, OAuth with scopes `user-top-read` + `user-read-recently-played`). **(B)** Paste a **Bearer** token from any OAuth flow that obtained those scopes: `python -m ml spotify --token …` (tokens expire, ~1 hour). See [Authorization code flow](https://developer.spotify.com/documentation/web-api/tutorials/code-flow). |
 | **`HF_TOKEN`** (Hugging Face) | Uploading models (`ml train --push-to-hub`), gated datasets, Hub downloads if needed | [huggingface.co/settings/tokens](https://huggingface.co/settings/tokens) — create a token with **write** if you push models. |
 
 These are **different** products: Spotify proves *your listening account*; Hugging Face proves *your HF account*.
+
+### Spotify `audio-features` returns 403
+
+Some developer apps no longer get `/v1/audio-features` (Spotify returns **403**). The CLI **does not crash**: it fills audio-derived fields with **neutral defaults** and still saves **`top_track_ids`** / **`recent_track_ids`** so **`train-user`** (embedding centroids) keeps working. Check `audio_features_ok` in the generated JSON `debug` section.
 
 ### Weather and “context”
 
@@ -92,7 +96,7 @@ python -m ml run --demo-user chill --top-k 20
 
 That downloads `song_tower_v1.pt`, `song_embeddings_v1.npy`, and `song_ids_v1.npy` from the Hub, builds a 128-d query from the **chill** demo 17-d vector (random **User Tower** weights — good for pipeline check, not “real” taste until you train User Tower), and prints the top similar track IDs.
 
-**With your Spotify taste** (needs a [Spotify dev token](https://developer.spotify.com/console/) with `user-top-read` + `user-read-recently-played`):
+**With your Spotify taste** (Dashboard app + Spotipy OAuth, or a Bearer token with `user-top-read` + `user-read-recently-played` — see **Tokens** above):
 
 ```bash
 python -m ml spotify --token "YOUR_BEARER_TOKEN" --out ml/cli/my_user.json

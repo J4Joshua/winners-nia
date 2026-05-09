@@ -51,6 +51,15 @@ def _unwrap_for_export(model: nn.Module) -> nn.Module:
     return model
 
 
+def _cudagraph_mark_step() -> None:
+    """Separate CUDAGraph steps when torch.compile runs twice per batch (two dropout views)."""
+    if not torch.cuda.is_available():
+        return
+    fn = getattr(torch.compiler, "cudagraph_mark_step_begin", None)
+    if callable(fn):
+        fn()
+
+
 def train_one_epoch(
     model: nn.Module,
     loader: DataLoader,
@@ -69,7 +78,9 @@ def train_one_epoch(
         optimizer.zero_grad(set_to_none=True)
 
         with torch.amp.autocast("cuda", enabled=use_amp):
+            _cudagraph_mark_step()
             anchor = model(x)
+            _cudagraph_mark_step()
             positive = model(x)
             loss = info_nce_loss(anchor, positive, temperature=tau)
 
@@ -99,7 +110,9 @@ def evaluate(
     for x, _ in loader:
         x = x.to(device, non_blocking=True)
         with torch.amp.autocast("cuda", enabled=use_amp):
+            _cudagraph_mark_step()
             anchor = model(x)
+            _cudagraph_mark_step()
             positive = model(x)
             loss = info_nce_loss(anchor, positive, temperature=tau)
         total_loss += loss.item()

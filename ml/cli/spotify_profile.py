@@ -17,11 +17,92 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 
+from ml.cli.spotify_audio import fetch_audio_features_http, fetch_audio_features_spotify, spotify_access_token
+
+
+def primary_artist_ids_from_top_tracks(top_tracks: list[dict]) -> list[str]:
+    out: list[str] = []
+    seen: set[str] = set()
+    for t in top_tracks:
+        arts = t.get("artists") or []
+        if not arts or not isinstance(arts[0], dict):
+            continue
+        aid = arts[0].get("id")
+        if aid and str(aid) not in seen:
+            seen.add(str(aid))
+            out.append(str(aid))
+    return out
+
+
+def fetch_artists_http(access_token: str, artist_ids: list[str]) -> list[dict]:
+    import json as json_lib
+    import urllib.error
+    import urllib.request
+
+    if not artist_ids:
+        return []
+    all_a: list[dict] = []
+    for i in range(0, len(artist_ids), 50):
+        chunk = artist_ids[i : i + 50]
+        ids_str = ",".join(chunk)
+        url = f"https://api.spotify.com/v1/artists?ids={ids_str}"
+        req = urllib.request.Request(url, headers={"Authorization": f"Bearer {access_token}"})
+        try:
+            with urllib.request.urlopen(req) as r:
+                body = json_lib.loads(r.read().decode())
+        except urllib.error.HTTPError:
+            break
+        items = body.get("artists") if isinstance(body, dict) else None
+        if not items:
+            continue
+        all_a.extend(a for a in items if isinstance(a, dict))
+    return all_a
+
+
+def genre_diversity_from_top_tracks(access_token: str, top_tracks: list[dict]) -> float:
+    aids = primary_artist_ids_from_top_tracks(top_tracks)
+    if not aids:
+        return 0.4
+    try:
+        artists = fetch_artists_http(access_token, aids)
+    except Exception:
+        return 0.4
+    genres_flat: list[str] = []
+    for a in artists:
+        for g in a.get("genres") or []:
+            if isinstance(g, str) and g:
+                genres_flat.append(g)
+    if not genres_flat:
+        return 0.4
+    return min(len(set(genres_flat)) / 15.0, 1.0)
+
+
+def track_metadata_debug(top_tracks: list[dict]) -> dict[str, float]:
+    if not top_tracks:
+        return {"mean_popularity_norm": 0.5, "mean_duration_norm": 0.5, "explicit_fraction": 0.5}
+    pops: list[float] = []
+    durs: list[float] = []
+    ex: list[float] = []
+    for t in top_tracks:
+        pops.append(float(t.get("popularity") or 0) / 100.0)
+        dm = int(t.get("duration_ms") or 0)
+        durs.append(min(dm / 330000.0, 1.0))
+        ex.append(1.0 if t.get("explicit") else 0.0)
+    n = len(top_tracks)
+    return {
+        "mean_popularity_norm": round(sum(pops) / n, 3),
+        "mean_duration_norm": round(sum(durs) / n, 3),
+        "explicit_fraction": round(sum(ex) / n, 3),
+    }
+
+
 def compute_user_features(
     top_tracks: list[dict],
-    audio_features: list[dict],
+    audio_features: list[dict | None],
     recent_tracks: list[dict],
     display_name: str = "",
+    *,
+    genre_diversity_score: float | None = None,
 ) -> dict:
     valid_af = [af for af in audio_features if af and af.get("danceability") is not None]
 
@@ -37,12 +118,12 @@ def compute_user_features(
     mean_tempo_norm = min(mean_af("tempo") / 240.0, 1.0)
     loudness_vals = [af["loudness"] for af in valid_af if "loudness" in af]
     mean_loudness_norm = (
-        sum(min(max((l + 60.0) / 60.0, 0.0), 1.0) for l in loudness_vals) / len(loudness_vals)
+        sum(min(max((loud + 60.0) / 60.0, 0.0), 1.0) for loud in loudness_vals) / len(loudness_vals)
         if loudness_vals
         else 0.5
     )
 
-    genre_diversity = 0.4
+    genre_diversity = genre_diversity_score if genre_diversity_score is not None else 0.4
 
     hour_counts: Counter[int] = Counter()
     unique_tracks_7d: set[str] = set()
@@ -143,11 +224,15 @@ def compute_user_features(
             "mean_acousticness": round(mean_acousticness, 3),
             "mean_instrumentalness": round(mean_instrumentalness, 3),
             "mean_tempo_bpm": round(mean_tempo_norm * 240, 1),
+            "genre_diversity": round(genre_diversity, 3),
             "peak_hour": peak_hour,
             "session_length_avg": round(session_length_avg, 1),
             "discovery_ratio": round(discovery_ratio, 3),
-            "top_tracks_used": len(valid_af),
+            "top_track_count": len(top_tracks),
+            "audio_features_count": len(valid_af),
             "recent_tracks_used": total_recent,
+            "audio_features_ok": len(valid_af) > 0,
+            **track_metadata_debug(top_tracks),
         },
     }
 
@@ -174,11 +259,14 @@ def fetch_with_token(token: str) -> dict:
     print(f"  → {len(top_tracks)} tracks")
 
     track_ids = [t["id"] for t in top_tracks if t.get("id")]
-    print(f"Fetching audio features for {len(track_ids)} tracks ...")
-    ids_str = ",".join(track_ids[:50])
-    af_resp = get(f"https://api.spotify.com/v1/audio-features?ids={ids_str}")
-    audio_features = af_resp.get("audio_features", [])
-    print(f"  → {len([a for a in audio_features if a])} valid")
+    batch_ids = track_ids[:100]
+    print(f"Fetching audio features for {len(batch_ids)} tracks ...")
+    audio_features = fetch_audio_features_http(token, batch_ids)
+    print(f"  → {len([a for a in audio_features if a])} valid (audio analysis)")
+
+    print("Fetching artist genres (top tracks) ...")
+    genre_div = genre_diversity_from_top_tracks(token, top_tracks)
+    print(f"  → genre_diversity ≈ {genre_div:.2f}")
 
     print("Fetching recently played (50) ...")
     recent_resp = get("https://api.spotify.com/v1/me/player/recently-played?limit=50")
@@ -190,6 +278,7 @@ def fetch_with_token(token: str) -> dict:
         "top_tracks": top_tracks,
         "audio_features": audio_features,
         "recent_tracks": recent_tracks,
+        "genre_diversity_score": genre_div,
     }
 
 
@@ -200,7 +289,7 @@ def fetch_with_oauth(client_id: str, client_secret: str, redirect_uri: str) -> d
     except ImportError:
         raise SystemExit(
             "spotipy not installed. Run: pip install spotipy\n"
-            "Or use --token from https://developer.spotify.com/console/"
+            "Or obtain a user access token via OAuth (see https://developer.spotify.com/documentation/web-api/tutorials/code-flow)"
         )
 
     scope = "user-top-read user-read-recently-played"
@@ -225,8 +314,12 @@ def fetch_with_oauth(client_id: str, client_secret: str, redirect_uri: str) -> d
 
     track_ids = [t["id"] for t in top_tracks if t.get("id")]
     print(f"Fetching audio features for {len(track_ids)} tracks ...")
-    audio_features = sp.audio_features(track_ids[:50])
-    print(f"  → {len([a for a in audio_features if a])} valid")
+    audio_features = fetch_audio_features_spotify(sp, track_ids)
+    print(f"  → {len([a for a in audio_features if a])} valid (audio analysis)")
+
+    print("Fetching artist genres (top tracks) ...")
+    genre_div = genre_diversity_from_top_tracks(spotify_access_token(sp), top_tracks)
+    print(f"  → genre_diversity ≈ {genre_div:.2f}")
 
     print("Fetching recently played (50) ...")
     recent_resp = sp.current_user_recently_played(limit=50)
@@ -238,6 +331,7 @@ def fetch_with_oauth(client_id: str, client_secret: str, redirect_uri: str) -> d
         "top_tracks": top_tracks,
         "audio_features": audio_features,
         "recent_tracks": recent_tracks,
+        "genre_diversity_score": genre_div,
     }
 
 
@@ -247,20 +341,27 @@ def parse_spotify_args(argv: list[str] | None = None) -> argparse.Namespace:
         description="Build 17-d user features from Spotify Web API",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
-Token flow (fastest):
-  https://developer.spotify.com/console/get-recently-played/
-  Get Token → enable user-top-read + user-read-recently-played → copy
+Token flow (recommended — Console “Get Token” pages are retired):
 
-OAuth flow:
-  pip install spotipy
-  python -m ml spotify --client-id ... --client-secret ...
+  1) https://developer.spotify.com/dashboard → Create app → Settings
+  2) Redirect URIs: add the same value you pass as --redirect-uri
+     (e.g. http://127.0.0.1:8888/callback — Spotify prefers loopback IPs over "localhost" for new apps)
+  3) pip install spotipy
+  4) python -m ml spotify --client-id YOUR_ID --client-secret YOUR_SECRET
+
+Optional: paste a short-lived Bearer token from any OAuth tool:
+  python -m ml spotify --token YOUR_ACCESS_TOKEN
+
+Scopes required: user-top-read, user-read-recently-played
+
+Docs: https://developer.spotify.com/documentation/web-api/tutorials/code-flow
 """,
     )
     auth = p.add_mutually_exclusive_group(required=True)
     auth.add_argument("--token", type=str)
     auth.add_argument("--client-id", type=str)
     p.add_argument("--client-secret", type=str, default=None)
-    p.add_argument("--redirect-uri", type=str, default="http://localhost:8888/callback")
+    p.add_argument("--redirect-uri", type=str, default="http://127.0.0.1:8888/callback")
     p.add_argument("--out", type=str, default="ml/cli/my_user.json")
     return p.parse_args(argv)
 
@@ -279,6 +380,7 @@ def run_spotify_profile(args: argparse.Namespace) -> None:
         audio_features=data["audio_features"],
         recent_tracks=data["recent_tracks"],
         display_name=data.get("display_name", ""),
+        genre_diversity_score=data.get("genre_diversity_score"),
     )
 
     out_path = Path(args.out)
