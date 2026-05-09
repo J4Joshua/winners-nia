@@ -1,6 +1,8 @@
 ml/cli/my_user.json
 
 __pycache__/
+
+app/ios/
 *.pyc
 .venv/
 *.egg-info/

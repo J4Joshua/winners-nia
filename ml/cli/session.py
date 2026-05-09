@@ -177,32 +177,26 @@ class SessionState:
 
         # ── Pre-computed context similarity matrix ─────────────────────────────
         # Maps every possible context key → its Song Tower vibe embedding.
-        # Used to propagate learning across similar contexts:
-        #   when you like a "gym" song, "commute" (similar energy vibe) also
-        #   gets a partial update proportional to cosine(gym_emb, commute_emb).
-        # This lets the model generalise: "gym+rainy" learnings partially transfer
-        # to "gym+sunny" and "commute+rainy", combining knowledge across contexts.
+        # Used to propagate learning across similar contexts.
         self._all_ctx_embs: dict[str, np.ndarray] = self._precompute_context_embs()
 
         # ── CoSeRNN-style online learning (no backward pass) ──────────────────
-        # Live embedding: starts from User Tower output, updated in embedding
-        # space via EMA on each like/dislike. No gradient descent = no
-        # catastrophic forgetting, and 100x faster than Adam steps.
         self._live_emb: np.ndarray = self._compute_base_emb()
-
-        # Session aggregates: EMA of liked / disliked song embeddings.
-        # Blended into the query for continuous in-session adaptation.
-        # Inspired by Spotify CoSeRNN: query = long_term + session_delta + context.
         self._liked_agg:    np.ndarray | None = None
         self._disliked_agg: np.ndarray | None = None
 
-        # Session stats (for TUI display)
-        self.n_likes    = 0
-        self.n_dislikes = 0
+        # Session stats
+        self.n_likes     = 0
+        self.n_dislikes  = 0
         self.n_refreshes = 0
 
-        # Learned per-context preference offsets
+        # Learned per-context preference offsets (populated from save or online learning)
         self._context_offsets: dict[str, np.ndarray] = {}
+
+        # ── Restore persisted session state (if checkpoint has extras) ────────
+        # Overrides the freshly-computed live_emb / resets context_offsets from save.
+        # Must be called AFTER all the above are initialised.
+        self._restore_session_state()
 
     def set_vibe(self,     v: str | None) -> None: self.context_vibe = v
     def set_time(self,     t: str | None) -> None: self.context_time = t
@@ -229,6 +223,38 @@ class SessionState:
             feats[IDX_PEAK_SIN] = math.sin(2 * math.pi * h / 24)
             feats[IDX_PEAK_COS] = math.cos(2 * math.pi * h / 24)
         return feats
+
+    def _restore_session_state(self) -> None:
+        """
+        If the User Tower checkpoint contains persisted live_emb / context_offsets,
+        restore them and apply a gentle decay (×0.9) to simulate natural preference
+        drift between sessions.  Restoring means context learning is cumulative —
+        preferences for gym / rainy / etc. improve every time you use the app.
+        """
+        if not self.save_path.exists():
+            return
+        try:
+            ckpt = torch.load(str(self.save_path), map_location="cpu", weights_only=True)
+        except Exception:
+            return
+
+        if "live_emb" in ckpt:
+            emb = np.array(ckpt["live_emb"], dtype=np.float32)
+            norm = np.linalg.norm(emb)
+            if norm > 1e-8:
+                self._live_emb = emb / norm   # override the freshly-computed one
+
+        if "context_offsets" in ckpt:
+            decay = 0.9   # slight forgetting between sessions keeps offsets fresh
+            for k, v in ckpt["context_offsets"].items():
+                arr = np.array(v, dtype=np.float32) * decay
+                if np.linalg.norm(arr) > 1e-8:
+                    self._context_offsets[k] = arr
+
+        if "n_likes" in ckpt:
+            self.n_likes     = ckpt.get("n_likes", 0)
+            self.n_dislikes  = ckpt.get("n_dislikes", 0)
+            self.n_refreshes = ckpt.get("n_refreshes", 0)
 
     def _compute_base_emb(self) -> np.ndarray:
         """Run User Tower forward pass to get the initial embedding."""
@@ -476,54 +502,108 @@ class SessionState:
 
         self.feedback_log.append(f"↺  queue skipped ({len(embs)} songs) — soft nudge")
 
-    def play_track(self, tid: str) -> str:
-        """
-        Start playing a track on the user's active Spotify device.
-
-        Returns a status message for the feedback log.
-        Requires a token with 'user-modify-playback-state' scope and Spotify Premium.
-        """
-        if not self.spotify_token:
-            return "⚠️  No Spotify token — login via 'ml session' onboarding to enable playback"
-
-        import urllib.request, urllib.error as _ue, json as _json
-        uri    = f"spotify:track:{tid}"
-        name   = self.names.get(tid, tid)
-        body   = _json.dumps({"uris": [uri]}).encode()
-        req    = urllib.request.Request(
-            "https://api.spotify.com/v1/me/player/play",
+    def _spotify_request(self, method: str, path: str, body: bytes | None = None) -> tuple[int, bytes]:
+        """Low-level authenticated Spotify request. Returns (status_code, body_bytes)."""
+        import urllib.request as _ur
+        import urllib.error   as _ue
+        req = _ur.Request(
+            f"https://api.spotify.com{path}",
             data=body,
-            method="PUT",
+            method=method,
             headers={
                 "Authorization": f"Bearer {self.spotify_token}",
-                "Content-Type":  "application/json",
+                **({"Content-Type": "application/json"} if body is not None else {}),
             },
         )
         try:
-            with urllib.request.urlopen(req, timeout=5) as resp:
-                if resp.status == 204:
-                    self.now_playing = tid
-                    return f"▶  {name}"
-                return f"⚠️  Spotify returned {resp.status}"
+            with _ur.urlopen(req, timeout=6) as r:
+                return r.status, r.read()
         except _ue.HTTPError as e:
-            if e.code == 404:
-                return "⚠️  No active Spotify device — open Spotify first"
-            if e.code == 403:
-                return "⚠️  Playback needs Spotify Premium + user-modify-playback-state scope"
-            if e.code == 401:
-                return "⚠️  Token expired — paste a fresh token"
-            return f"⚠️  Spotify error {e.code}"
-        except Exception as exc:
-            return f"⚠️  Playback error: {exc}"
+            return e.code, b""
+
+    def play_track(self, tid: str) -> str:
+        """Play a track immediately on the active Spotify device."""
+        if not self.spotify_token:
+            return "⚠️  No Spotify token — run 'ml session' onboarding to enable playback"
+        import json as _json
+        body   = _json.dumps({"uris": [f"spotify:track:{tid}"]}).encode()
+        status, _ = self._spotify_request("PUT", "/v1/me/player/play", body)
+        name = self.names.get(tid, tid)
+        if status == 204:
+            self.now_playing = tid
+            return f"▶  {name}"
+        if status == 404:
+            return "⚠️  No active device — open Spotify on any device first"
+        if status == 403:
+            return "⚠️  Needs Spotify Premium + user-modify-playback-state scope"
+        if status == 401:
+            return "⚠️  Token expired — re-run onboarding"
+        return f"⚠️  Spotify {status}"
+
+    def queue_recommendations(self, tids: list[str]) -> str:
+        """
+        Add all current recommendations to the Spotify queue.
+
+        After pressing Q: Spotify will play through your top-k recommendations
+        in order, then continue with its own suggestions.
+        Automatically plays the first track if nothing is currently playing.
+        """
+        if not self.spotify_token:
+            return "⚠️  No Spotify token — run 'ml session' onboarding to enable playback"
+
+        import urllib.parse
+        queued = 0
+        for tid in tids:
+            uri    = urllib.parse.quote(f"spotify:track:{tid}", safe="")
+            status, _ = self._spotify_request("POST", f"/v1/me/player/queue?uri={uri}")
+            if status in (200, 204):
+                queued += 1
+            elif status == 404:
+                break  # no active device
+            elif status in (401, 403):
+                break  # auth issue
+
+        if queued == 0:
+            return "⚠️  Could not queue — open Spotify on any device first"
+
+        # Play the first track immediately so the queue starts now
+        if tids:
+            self.play_track(tids[0])
+
+        return f"➕  Queued {queued} tracks · ▶ playing first now"
+
+    def get_playback_state(self) -> dict | None:
+        """Fetch current Spotify playback state (for skip detection)."""
+        if not self.spotify_token:
+            return None
+        status, body = self._spotify_request("GET", "/v1/me/player")
+        if status == 200 and body:
+            import json as _json
+            try:
+                return _json.loads(body)
+            except Exception:
+                pass
+        return None
 
     def like(self, tid: str) -> float | None: return self._update(tid, True)
     def dislike(self, tid: str) -> float | None: return self._update(tid, False)
 
     def save(self) -> None:
         self.save_path.parent.mkdir(parents=True, exist_ok=True)
-        torch.save({"model_state_dict": self.user_tower.cpu().state_dict()}, self.save_path)
+        torch.save({
+            "model_state_dict": self.user_tower.cpu().state_dict(),
+            # Persist the in-session learned state so context preferences
+            # accumulate across sessions (not just within one).
+            "live_emb":         self._live_emb.tolist(),
+            "context_offsets":  {k: v.tolist() for k, v in self._context_offsets.items()},
+            "n_likes":          self.n_likes,
+            "n_dislikes":       self.n_dislikes,
+            "n_refreshes":      self.n_refreshes,
+        }, self.save_path)
         self.user_tower.to(self.device)
-        self.feedback_log.append(f"💾  Saved → {self.save_path}")
+        total = self.n_likes + self.n_dislikes + self.n_refreshes
+        nctx  = len(self._context_offsets)
+        self.feedback_log.append(f"💾  Saved  ({total} interactions · {nctx} context keys) → {self.save_path}")
 
 
 # ── TUI (built lazily so import works without textual installed) ──────────────
@@ -594,41 +674,44 @@ def _build_app(
             border: round $accent; padding: 2 3;
             background: $surface;
         }
-        #title  { text-style: bold; color: $accent; margin-bottom: 1; }
-        #note   { color: $text-muted; margin: 1 0; }
-        #hint   { color: $text-muted; text-style: italic; margin-top: 1; }
-        #error  { color: $error; margin-top: 1; }
-        #tok    { margin: 0 0 1 0; }
-        #submit { margin-top: 1; width: 100%; }
+        #title   { text-style: bold; color: $accent; margin-bottom: 1; }
+        #note    { color: $text-muted; margin: 1 0 0 0; }
+        #hint    { color: $text-muted; text-style: italic; margin-top: 1; }
+        #error   { color: $error; margin-top: 1; }
+        .field   { margin: 0 0 1 0; }
+        #submit  { margin-top: 1; width: 100%; }
         """
 
         def compose(self) -> ComposeResult:
             yield Header()
             with Static(id="card"):
                 yield Label("🎵  Attune", id="title")
-                yield Label("Paste your Spotify Bearer token:", id="note")
-                yield Input(placeholder="BQB3…", id="tok")
-                yield Button("Connect →", id="submit", variant="primary")
+                yield Label("Spotify Client ID:", id="note")
+                yield Input(placeholder="abc123…", id="cid", classes="field")
+                yield Label("Spotify Client Secret:", id="note2")
+                yield Input(placeholder="def456…", id="csec", password=True, classes="field")
+                yield Button("Connect →  (opens browser for login)", id="submit", variant="primary")
                 yield Static(
-                    "[dim]Get a token: open.spotify.com → DevTools (F12) → Network tab\n"
-                    "→ any request to api.spotify.com → Authorization header → copy after 'Bearer '[/dim]",
+                    "[dim]Create an app at developer.spotify.com → Dashboard → Create App\n"
+                    "Redirect URI: http://localhost:8888/callback[/dim]",
                     id="hint",
                 )
                 yield Static("", id="error")
             yield Footer()
 
         def _submit(self) -> None:
-            token = self.query_one("#tok", Input).value.strip()
-            if not token:
-                self.query_one("#error", Static).update("[red]Token cannot be empty[/red]")
+            cid  = self.query_one("#cid",  Input).value.strip()
+            csec = self.query_one("#csec", Input).value.strip()
+            if not cid or not csec:
+                self.query_one("#error", Static).update("[red]Both Client ID and Secret are required[/red]")
                 return
-            self.app.push_screen(ProgressScreen(token))
+            self.app.push_screen(ProgressScreen(client_id=cid, client_secret=csec))
 
         def on_button_pressed(self, e: Button.Pressed) -> None:
             if e.button.id == "submit":
                 self._submit()
 
-        def on_input_submitted(self, e: Input.Submitted) -> None:
+        def on_input_submitted(self, _: Input.Submitted) -> None:
             self._submit()
 
     # ── progress screen ──────────────────────────────────────────────────────
@@ -643,9 +726,11 @@ def _build_app(
         }
         """
 
-        def __init__(self, token: str) -> None:
+        def __init__(self, client_id: str, client_secret: str) -> None:
             super().__init__()
-            self._token = token
+            self._client_id     = client_id
+            self._client_secret = client_secret
+            self._token: str    = ""   # set after OAuth
             self._lines: list[str] = []
 
         def compose(self) -> ComposeResult:
@@ -667,21 +752,22 @@ def _build_app(
                 self.app.call_from_thread(self._log, msg)
 
             try:
-                # 1. Validate token + get username
-                log("🔐  Verifying token…")
-                import urllib.request, urllib.error as _ue
-                req = urllib.request.Request(
-                    "https://api.spotify.com/v1/me",
-                    headers={"Authorization": f"Bearer {self._token}"},
+                # 1. OAuth — opens browser, catches redirect, returns token with all scopes
+                log("🔐  Opening Spotify login in your browser…")
+                log("    (scopes: top-read · recently-played · library · playback)")
+                from ml.cli.spotify_profile import (
+                    compute_user_features, fetch_with_oauth,
                 )
-                try:
-                    with urllib.request.urlopen(req, timeout=10) as r:
-                        me = json.loads(r.read())
-                except _ue.HTTPError as exc:
-                    self.app.call_from_thread(self._log, f"[red]Token rejected ({exc.code}). Paste a fresh token.[/red]")
-                    return
-                display_name = me.get("display_name", "User")
-                log(f"  ✓  Logged in as [bold]{display_name}[/bold]")
+                _REDIRECT = "http://localhost:8888/callback"
+                data = fetch_with_oauth(
+                    client_id=self._client_id,
+                    client_secret=self._client_secret,
+                    redirect_uri=_REDIRECT,
+                )
+                display_name  = data["display_name"]
+                self._token   = data["access_token"]
+                log(f"  ✓  Logged in as [bold]{display_name}[/bold]  (playback enabled ▶)")
+                log(f"  ✓  {len(data['top_tracks'])} top  ·  {len(data['recent_tracks'])} recent  ·  {len(data.get('liked_track_ids', []))} liked")
 
                 # 2. Load catalog
                 log("📦  Loading song catalog from Hub…")
@@ -692,15 +778,7 @@ def _build_app(
                 catalog["names"] = names
                 log(f"  ✓  {len(ids):,} tracks  ({len(names):,} named)")
 
-                # 3. Fetch Spotify data via token
-                from ml.cli.spotify_profile import (
-                    compute_user_features, fetch_with_token,
-                )
-                log("🎵  Fetching your Spotify data…")
-                data = fetch_with_token(self._token)
-                log(f"  ✓  {len(data['top_tracks'])} top  ·  {len(data['recent_tracks'])} recent  ·  {len(data.get('liked_track_ids', []))} liked")
-
-                # 4. Compute profile + save
+                # 3. Compute profile + save
                 profile = compute_user_features(
                     top_tracks=data["top_tracks"],
                     audio_features=data["audio_features"],
@@ -773,7 +851,8 @@ def _build_app(
         }
         """
         BINDINGS: ClassVar[list[Binding]] = [
-            Binding("enter",   "play",        "▶ Play",    show=True),
+            Binding("enter",   "play",         "▶ Play",     show=True),
+            Binding("shift+q", "queue_all",    "➕ Queue all", show=True),
             Binding("l",       "like",         "♥ Like"),
             Binding("d",       "dislike",      "✕ Dislike"),
             Binding("v",       "pick_vibe",    "Vibe"),
@@ -790,6 +869,7 @@ def _build_app(
             super().__init__()
             self.state = state
             self._row_ids: list[str] = []
+            self._last_playing_id: str | None = None   # for skip detection
 
         def compose(self) -> ComposeResult:
             yield Header(show_clock=True)
@@ -804,6 +884,8 @@ def _build_app(
         def on_mount(self) -> None:
             self._refresh_bar()
             self._refresh_songs()
+            if self.state.spotify_token:
+                self.set_interval(8, self._poll_spotify)  # skip detection every 8s
 
         @staticmethod
         def _score_bar(score: float, width: int = 10) -> str:
@@ -859,8 +941,45 @@ def _build_app(
             if tid := self._cur_tid():
                 msg = self.state.play_track(tid)
                 self.state.feedback_log.append(msg)
+                self._last_playing_id = tid
                 self._refresh_log()
-                self._refresh_songs()  # update ▶ indicator
+                self._refresh_songs()
+
+        def action_queue_all(self) -> None:
+            msg = self.state.queue_recommendations(list(self._row_ids))
+            self.state.feedback_log.append(msg)
+            if self._row_ids:
+                self._last_playing_id = self._row_ids[0]
+            self._refresh_log()
+            self._refresh_songs()
+
+        def _poll_spotify(self) -> None:
+            """
+            Every 8s: check if Spotify moved to a new track we didn't choose.
+            If so, register the previous track as a soft-dislike (user skipped it).
+            Runs on Textual's timer — non-blocking from the UI thread's perspective.
+            """
+            state = self.state.get_playback_state()
+            if not state:
+                return
+            item = state.get("item") or {}
+            current_id = item.get("id")
+            if not current_id:
+                return
+
+            prev = self._last_playing_id
+            if prev and current_id != prev and current_id not in self._row_ids[:3]:
+                # Track changed to something outside our top-3 — interpret as skip
+                if prev in self.state.id_to_emb:
+                    self.state.dislike(prev)
+                    self._refresh_bar()
+                    self._refresh_log()
+
+            self._last_playing_id = current_id
+            # Update ▶ indicator to reflect what's actually playing in Spotify
+            if self.state.now_playing != current_id:
+                self.state.now_playing = current_id
+                self._refresh_songs()
 
         def action_like(self) -> None:
             if tid := self._cur_tid():

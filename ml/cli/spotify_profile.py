@@ -446,7 +446,10 @@ def fetch_with_oauth(client_id: str, client_secret: str, redirect_uri: str) -> d
             "Or obtain a user access token via OAuth (see https://developer.spotify.com/documentation/web-api/tutorials/code-flow)"
         )
 
-    scope = "user-top-read user-read-recently-played user-library-read"
+    scope = (
+        "user-top-read user-read-recently-played user-library-read "
+        "user-modify-playback-state user-read-playback-state"
+    )
     sp = spotipy.Spotify(
         auth_manager=SpotifyOAuth(
             client_id=client_id,
@@ -490,6 +493,7 @@ def fetch_with_oauth(client_id: str, client_secret: str, redirect_uri: str) -> d
 
     return {
         "display_name": display_name,
+        "access_token": spotify_access_token(sp),   # bearer token for playback control
         "top_tracks": top_tracks,
         "audio_features": audio_features,
         "recent_tracks": recent_tracks,
