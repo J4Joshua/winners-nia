@@ -1,0 +1,8 @@
+# Install these when PyTorch is already provided (e.g. RunPod pytorch template).
+# Keeps the container's CUDA-matched torch instead of reinstalling from pip.
+
+numpy>=1.26.0
+datasets>=2.18.0
+huggingface_hub>=0.22.0
+faiss-cpu>=1.8.0
+tqdm>=4.66.0

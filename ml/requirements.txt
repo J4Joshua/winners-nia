@@ -1,0 +1,21 @@
+# Song Tower training — PyTorch stack
+#
+# Supported PyTorch: 2.2+ (torch.amp, torch.compile). Recommended: 2.4.x + CUDA 12.4
+# (matches RunPod template runpod/pytorch:2.4.0-py3.11-cuda12.4.1-devel-ubuntu22.04).
+#
+# On RunPod: use the PyTorch template image, then install extras only:
+#   ./ml/scripts/setup_training_env.sh --extras-only
+# See ml/requirements-train-extras.txt
+
+torch>=2.2.0
+numpy>=1.26.0
+
+# HuggingFace dataset download
+datasets>=2.18.0
+huggingface_hub>=0.22.0
+
+# ANN search (CPU build — use faiss-gpu if on GPU server)
+faiss-cpu>=1.8.0
+
+# Progress bars / display
+tqdm>=4.66.0

@@ -1,0 +1,7 @@
+# Large binary artifacts — tracked on HuggingFace Hub, not in git
+*.npy
+*.index
+song_tower_best.pt
+song_tower_v1.pt
+checkpoints/
+README_hub.md

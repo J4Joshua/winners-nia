@@ -1,30 +1,192 @@
-# Machine learning
+# Machine learning (PyTorch)
 
-Four blocks: **Song Tower** (shared, frozen) embeds tracks from tabular audio features; **User Tower** (per user, online-updated) maps history + behavior into the same 128-d space; **Context Encoder** gates a context shift on that vector; **GRU** outputs a session query for “next” in embedding space. Retrieval: **FAISS** (~500 candidates) → dot-product rank → known/new interleave (~20 tracks).
+**Attune** uses a shared **Song Tower** (26-d tabular features → 128-d L2 embedding) trained with **InfoNCE** on the [Spotify tracks HuggingFace dataset](https://huggingface.co/datasets/maharshipandya/spotify-tracks-dataset), plus a per-user **User Tower** (17-d → 128-d) for taste. This package is the training and smoke-test CLI; all heavy lifting is **PyTorch** (CUDA when available, AMP on GPU).
 
-## Models
+## Install
 
-| Block | Spec | Train / run |
-|-------|------|-------------|
-| **Song** | MLP 26→256→128, **InfoNCE**, ~114k rows ([HF dataset](https://huggingface.co/datasets/maharshipandya/spotify-tracks-dataset)) | GPU pre-train once; **no grad** in prod / online step |
-| **User** | MLP 17→256→128 | Cold fit on Spotify history (~minutes CPU); online: 1 Adam step (e.g. lr 1e-5, clip 0.3) on **User weights only**, song frozen; replay ~200, batch new + ~8 random past; aim sub-2ms CPU |
-| **Context** | User 128-d + ~16-d context (hour, DOW, skip stats, location 1-hot, volume Δ, weather: temp/condition/humidity/is-daytime); **learned gate** on shift strength | Shared weights; ramp weather after ~2–3 weeks/user |
-| **GRU** | Step input ~141-d (128 song emb + listen ratio, skip, replay, vol Δ, hour, session skip rate, consecutive skips, location 3, position); **256-d** hidden → **128-d** query | Offline after **~1–2 weeks** real sessions |
+From the repo root:
 
-**Shared:** Song + Context + GRU weights, global FAISS. **Per user:** User Tower (~212 KB fp32), replay buffer, session state for GRU. **Scale:** optional **MAML**-style few-step init instead of full cold User train.
+```bash
+chmod +x ml/scripts/setup_training_env.sh   # once
+./ml/scripts/setup_training_env.sh          # auto: extras-only if torch already importable
+./ml/scripts/setup_training_env.sh --full   # force pip torch + full ml/requirements.txt
+./ml/scripts/setup_training_env.sh --extras-only   # RunPod / any env that already ships PyTorch + CUDA
+```
 
-## Labels (event → weight)
+Or manually:
 
-Replay 1.0 (strong User signal, e.g. 3×); add-to-playlist ~0.95; complete >~80% ~0.85; vol up +~0.15; listen >~50% ~0.60; early skip ~5–30s ~0.15; skip <~5s ~0.0; three consecutive skips → train stronger context shift. Tune thresholds but keep train/serve identical.
+```bash
+pip install -r ml/requirements.txt
+pip install spotipy   # optional: Spotify OAuth for ml spotify
+```
 
-## Inference
+### PyTorch version
 
-User → Context → FAISS (known / unknown pools) → GRU query → dot rank → interleave (e.g. 2 known / 3 new, max 3 new streak); tilt mix from skip/replay rate and location heuristics (e.g. gym vs home night).
+Training code needs **PyTorch 2.2+** (`torch.amp`, optional `torch.compile`). Recommended pairing for GPU pods: **PyTorch 2.4.x + CUDA 12.4**.
 
-## Ops (rough)
+**RunPod PyTorch templates** (pick an image, then `./ml/scripts/setup_training_env.sh --extras-only` so pip does not replace the container’s CUDA-matched build):
 
-Song pre-train: short **GPU** job (large InfoNCE batches). User cold + weekly User+GRU: modest CPU/GPU. **Prod start:** small **VPS** (REST + online UT + ~150–200 ms rank on CPU); add serverless GPU for inference if needed.
+| Template (example tag) | PyTorch | CUDA | Notes |
+|-------------------------|---------|------|--------|
+| `runpod/pytorch:2.4.0-py3.11-cuda12.4.1-devel-ubuntu22.04` | **2.4.0** | 12.4 | **Default recommendation** |
+| `runpod/pytorch:2.2.0-py3.10-cuda12.1.1-devel-ubuntu22.04` | 2.2.0 | 12.1 | Fine |
+| `runpod/pytorch:2.1.0-py3.10-cuda11.8.0-devel-ubuntu22.04` | 2.1.0 | 11.8 | Older stack |
+| PyTorch 2.8.x templates | varies | varies | Confirm exact tag in RunPod UI |
+
+Files: `ml/requirements.txt` (includes torch for laptop/bare venv), `ml/requirements-train-extras.txt` (no torch — for RunPod).
+
+Pod workflow:
+
+```bash
+cd /path/to/winners-nia
+./ml/scripts/setup_training_env.sh --extras-only
+export HF_TOKEN=hf_...   # optional
+python -m ml train --gpu-preset h100 --output-dir ml/export
+```
+
+## Unified CLI (recommended)
+
+All commands are `python -m ml <subcommand> ...` from the repository root.
+
+| Subcommand | Purpose |
+|------------|---------|
+| `train` | Train Song Tower on the HF dataset, export TorchScript + embeddings, optionally push to Hugging Face Hub |
+| `run` | Load artifacts (local or Hub), embed user profile, nearest-neighbor search over the catalog |
+| `faiss` | Build `IndexFlatIP` from exported embeddings |
+| `hub` | Upload `ml/export/` artifacts to a Hugging Face **model** repo |
+| `spotify` | Pull your top/recent tracks via Web API → write `my_user.json` (17-d features) |
+
+```bash
+python -m ml                    # usage
+python -m ml train --help
+python -m ml run --help
+```
+
+### User test (default model on Hugging Face)
+
+The public Song Tower + embeddings live at [**MrlolDev/attune-v0**](https://huggingface.co/MrlolDev/attune-v0). You do **not** need local `ml/export/*` files if you use the default Hub id.
+
+**Fastest** — built-in fake user profile (no Spotify):
+
+```bash
+cd /path/to/winners-nia
+./ml/scripts/setup_training_env.sh --extras-only   # or pip install -r ml/requirements.txt
+python -m ml run --demo-user chill --top-k 20
+```
+
+That downloads `song_tower_v1.pt`, `song_embeddings_v1.npy`, and `song_ids_v1.npy` from the Hub, builds a 128-d query from the **chill** demo 17-d vector (random **User Tower** weights — good for pipeline check, not “real” taste until you train User Tower), and prints the top similar track IDs.
+
+**With your Spotify taste** (needs a [Spotify dev token](https://developer.spotify.com/console/) with `user-top-read` + `user-read-recently-played`):
+
+```bash
+python -m ml spotify --token "YOUR_BEARER_TOKEN" --out ml/cli/my_user.json
+python -m ml run --user-json ml/cli/my_user.json --top-k 20
+```
+
+Optional: `--hub-repo MrlolDev/attune-v0` (same as the default) or another repo. For local files instead of Hub, use `--song-tower`, `--embeddings`, and `--ids` together.
+
+**Training upload default:** `python -m ml train --push-to-hub` pushes to `MrlolDev/attune-v0` unless you pass `--hub-repo org/other-name`.
+
+### End-to-end example
+
+```bash
+# 1) Train and push (default hub: MrlolDev/attune-v0 — override with --hub-repo if needed)
+python -m ml train --gpu-preset h100 --output-dir ml/export --push-to-hub
+
+# 2) FAISS index (CPU, optional — speeds up search once you have local embeddings)
+python -m ml faiss --embeddings ml/export/song_embeddings_v1.npy --ids ml/export/song_ids_v1.npy
+
+# 3) Your Spotify taste → JSON
+python -m ml spotify --token YOUR_TOKEN --out ml/cli/my_user.json
+
+# 4) Retrieval from local export + optional FAISS
+python -m ml run \
+  --song-tower ml/export/song_tower_v1.pt \
+  --embeddings ml/export/song_embeddings_v1.npy \
+  --ids ml/export/song_ids_v1.npy \
+  --faiss-index ml/export/faiss_song_v1.index \
+  --user-json ml/cli/my_user.json \
+  --top-k 20
+```
+
+Hub-only run (uses [**MrlolDev/attune-v0**](https://huggingface.co/MrlolDev/attune-v0) by default):
+
+```bash
+python -m ml run --demo-user chill
+# same as:
+python -m ml run --hub-repo MrlolDev/attune-v0 --demo-user chill
+```
+
+### Legacy module entrypoints (still supported)
+
+```bash
+python -m ml.training.train_song_tower --gpu-preset 4090 ...
+python -m ml.cli.test_user --song-tower ml/export/song_tower_v1.pt ...   # same as `ml run`
+```
+
+## GPU recommendation
+
+InfoNCE quality scales with **in-batch negatives** (batch size). Prefer GPUs with lots of VRAM.
+
+| Priority | GPU | Preset | Batch | Notes |
+|----------|-----|--------|-------|--------|
+| **Best** | **NVIDIA H100** 80GB | `--gpu-preset h100` | 2048 | Fast wall-clock + largest batches; enables `torch.compile` in preset |
+| Strong | **NVIDIA A100** 40/80GB | `--gpu-preset a100` | 1024 | Great cost/perf on many clouds |
+| Good | **RTX 4090** 24GB | `--gpu-preset 4090` | 512 | Default consumer; fine for hackathon timelines |
+| Budget | **NVIDIA L4** 24GB | `--gpu-preset l4` | 256 | Common on serverless / inference hosts |
+
+Rough Song Tower train time (30 epochs, ~114k tracks): **~5–10 min** (H100), **~8–15 min** (A100), **~20–40 min** (4090), **~30–60 min** (L4). Use `--gpu-preset <name>` so batch size, DataLoader workers, and compile flags stay aligned with your card.
+
+Authentication for Hugging Face upload: set `HF_TOKEN` or pass `--hub-token` on `train` / `hub`.
 
 ## Layout
 
-`training/`, `evaluation/`, `export/` (checkpoints, FAISS — gitignore binaries), optional `notebooks/`. Pin deps when code exists; no secrets in repo.
+```
+ml/
+├── __main__.py              # python -m ml
+├── cli/
+│   ├── main.py              # train | run | faiss | hub | spotify
+│   ├── run_args.py
+│   ├── spotify_profile.py
+│   └── test_user.py         # thin wrapper → run
+├── training/
+│   ├── engine.py            # PyTorch train loop, checkpoints, export
+│   ├── presets.py           # GPU presets
+│   ├── args.py
+│   ├── dataset.py
+│   └── train_song_tower.py
+├── inference/
+│   ├── run.py
+│   ├── loaders.py
+│   ├── search.py
+│   ├── user_query.py
+│   └── demo_users.py
+├── models/
+│   ├── song_tower.py
+│   └── user_tower.py
+├── scripts/
+│   └── setup_training_env.sh  # deps (RunPod: --extras-only)
+└── export/
+    ├── build_faiss.py
+    └── push_to_hub.py
+```
+
+## Architecture overview (from product spec)
+
+| Block | Role |
+|-------|------|
+| **Song Tower** | Shared frozen encoder; trained once on HF catalog |
+| **User Tower** | Per-user 17-d taste → 128-d (cold train + online updates in prod) |
+| **Context / GRU** | Planned: context shift + session query (not in this CLI yet) |
+
+Retrieval in production: user/context → FAISS (~500 candidates) → rank → interleave known/new tracks.
+
+## Demo user profiles (`ml run --demo-user`)
+
+| Name | Vibe |
+|------|------|
+| `pop` | Upbeat / afternoon-shaped |
+| `chill` | Acoustic / evening-shaped |
+| `hype` | High energy / fast tempo |
+
+For **your** account, use `ml spotify` then `ml run --user-json ...`.
