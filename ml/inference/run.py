@@ -53,12 +53,29 @@ def run_inference(args: Namespace) -> None:
     )
     search_ms = (time.perf_counter() - t0) * 1000
 
-    print(f"Top {top_k} nearest tracks  (search: {search_ms:.1f} ms)")
-    print("─" * 56)
-    print(f"{'Rank':>4}  {'Score':>6}  Track ID")
-    print("─" * 56)
+    # Optionally resolve track IDs → "Title — Artist" via Spotify API
+    spotify_token = getattr(args, "spotify_token", None)
+    names: dict[str, str] = {}
+    if spotify_token or __import__("os").environ.get("SPOTIFY_TOKEN"):
+        from ml.cli.spotify_tracks import resolve_track_names
+        names = resolve_track_names([tid for tid, _ in results], token=spotify_token)
+
+    has_names = bool(names)
+    col_w = 52 if has_names else 0
+    divider = "─" * (56 + (3 + col_w if has_names else 0))
+
+    print(f"\nTop {top_k} nearest tracks  (search: {search_ms:.1f} ms)")
+    print(divider)
+    header = f"{'Rank':>4}  {'Score':>6}  {'Track ID':<22}"
+    if has_names:
+        header += f"  {'Title — Artist'}"
+    print(header)
+    print(divider)
     for rank, (tid, score) in enumerate(results, 1):
-        print(f"{rank:>4}  {score:>6.4f}  {tid}")
+        line = f"{rank:>4}  {score:>6.4f}  {tid:<22}"
+        if has_names:
+            line += f"  {names.get(tid, '')}"
+        print(line)
 
     qt = getattr(args, "query_track", None)
     if qt:
