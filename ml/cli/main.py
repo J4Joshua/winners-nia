@@ -93,13 +93,23 @@ def main(argv: list[str] | None = None) -> None:
     if cmd == "session":
         import argparse
         from ml.cli.session import run_session
-        from ml.inference.demo_users import DEMO_USERS
 
-        p = argparse.ArgumentParser(prog="ml session", description="Interactive Attune TUI")
-        p.add_argument("--user-json", required=True, help="Profile JSON from `ml spotify`")
-        p.add_argument("--user-tower", required=True, help="User Tower checkpoint (.pt)")
+        p = argparse.ArgumentParser(
+            prog="ml session",
+            description="Interactive Attune TUI — Spotify login → train → recommendations",
+            formatter_class=argparse.RawDescriptionHelpFormatter,
+            epilog=(
+                "With no arguments, the TUI will walk you through Spotify login,\n"
+                "fetch your profile, train your User Tower, then open the session.\n\n"
+                "If ml/cli/my_user.json and ml/export/my_user_tower.pt already exist,\n"
+                "the TUI skips onboarding and goes straight to recommendations."
+            ),
+        )
+        p.add_argument("--user-json", default=None, help="Profile JSON (skips Spotify fetch if provided)")
+        p.add_argument("--user-tower", default=None, help="User Tower checkpoint (skips training if provided)")
         p.add_argument("--hub-repo", default=None, help="HF repo (default: MrlolDev/attune-v0)")
         p.add_argument("--top-k", type=int, default=20, help="Songs to show")
+        p.add_argument("--redirect-uri", default="http://127.0.0.1:8888/callback")
         p.add_argument("--device", default=None)
         run_session(p.parse_args(rest))
         return
