@@ -197,7 +197,6 @@ def _build_app(
     user_json_path: Path | None,
     tower_path: Path | None,
     top_k: int,
-    redirect_uri: str,
 ):
     from textual import work
     from textual.app import App, ComposeResult
@@ -273,13 +272,19 @@ def _build_app(
                 yield Static("", id="error")
             yield Footer()
 
+        def _submit(self) -> None:
+            token = self.query_one("#tok", Input).value.strip()
+            if not token:
+                self.query_one("#error", Static).update("[red]Token cannot be empty[/red]")
+                return
+            self.app.push_screen(ProgressScreen(token))
+
         def on_button_pressed(self, e: Button.Pressed) -> None:
             if e.button.id == "submit":
-                token = self.query_one("#tok", Input).value.strip()
-                if not token:
-                    self.query_one("#error", Static).update("[red]Token cannot be empty[/red]")
-                    return
-                self.app.push_screen(ProgressScreen(token))
+                self._submit()
+
+        def on_input_submitted(self, e: Input.Submitted) -> None:
+            self._submit()
 
     # ── progress screen ──────────────────────────────────────────────────────
 
@@ -326,8 +331,7 @@ def _build_app(
                 )
                 try:
                     with urllib.request.urlopen(req, timeout=10) as r:
-                        import json as _json
-                        me = _json.loads(r.read())
+                        me = json.loads(r.read())
                 except _ue.HTTPError as exc:
                     self.app.call_from_thread(self._log, f"[red]Token rejected ({exc.code}). Paste a fresh token.[/red]")
                     return
@@ -361,7 +365,7 @@ def _build_app(
                     liked_track_ids=data.get("liked_track_ids"),
                 )
                 DEFAULT_JSON.parent.mkdir(parents=True, exist_ok=True)
-                DEFAULT_JSON.write_text(_json.dumps(profile, indent=2))
+                DEFAULT_JSON.write_text(json.dumps(profile, indent=2))
                 log(f"  ✓  Profile saved → {DEFAULT_JSON}")
 
                 # 5. Train User Tower
@@ -572,12 +576,9 @@ def run_session(args) -> None:
     device = resolve_device(getattr(args, "device", None))
     hub_repo: str = getattr(args, "hub_repo", None) or DEFAULT_HUB_MODEL_REPO
     top_k: int = getattr(args, "top_k", 20)
-    redirect_uri: str = getattr(args, "redirect_uri", "http://127.0.0.1:8888/callback")
-
     user_json_path: Path | None = Path(args.user_json) if getattr(args, "user_json", None) else None
     tower_path: Path | None = Path(args.user_tower) if getattr(args, "user_tower", None) else None
 
-    # Auto-detect existing files if not explicitly provided
     if user_json_path is None and DEFAULT_JSON.exists():
         user_json_path = DEFAULT_JSON
     if tower_path is None and DEFAULT_TOWER.exists():
@@ -589,6 +590,5 @@ def run_session(args) -> None:
         user_json_path=user_json_path,
         tower_path=tower_path,
         top_k=top_k,
-        redirect_uri=redirect_uri,
     )
     app.run()

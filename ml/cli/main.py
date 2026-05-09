@@ -12,7 +12,7 @@ Attune ML (PyTorch)
 
   python -m ml train      --gpu-preset h100 ...
   python -m ml run        --vibe chill
-  python -m ml session    --user-json ml/cli/my_user.json --user-tower ml/export/my_user_tower.pt
+  python -m ml session    # or: --user-json my_user.json --user-tower my_user_tower.pt
   python -m ml faiss      --embeddings ml/export/song_embeddings_v1.npy ...
   python -m ml hub        --repo-id ORG/name --output-dir ml/export
   python -m ml train-user --user-json ml/cli/my_user.json ...
@@ -109,7 +109,6 @@ def main(argv: list[str] | None = None) -> None:
         p.add_argument("--user-tower", default=None, help="User Tower checkpoint (skips training if provided)")
         p.add_argument("--hub-repo", default=None, help="HF repo (default: MrlolDev/attune-v0)")
         p.add_argument("--top-k", type=int, default=20, help="Songs to show")
-        p.add_argument("--redirect-uri", default="http://127.0.0.1:8888/callback")
         p.add_argument("--device", default=None)
         run_session(p.parse_args(rest))
         return
