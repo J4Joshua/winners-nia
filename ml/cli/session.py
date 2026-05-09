@@ -567,10 +567,19 @@ def _build_app(
 
         def compose(self) -> ComposeResult:
             yield Label(self._title)
-            yield ListView(*[ListItem(Label(f"  {o}"), id=o) for o in self._options])
+            # Textual IDs must be alphanumeric/underscore/hyphen — use index-based IDs
+            # and resolve back to the original string via _options on selection.
+            yield ListView(*[
+                ListItem(Label(f"  {o}"), id=f"opt-{i}")
+                for i, o in enumerate(self._options)
+            ])
 
         def on_list_view_selected(self, e: ListView.Selected) -> None:
-            self.dismiss(e.item.id)
+            if e.item.id and e.item.id.startswith("opt-"):
+                idx = int(e.item.id[4:])
+                self.dismiss(self._options[idx])
+            else:
+                self.dismiss(None)
 
         def action_dismiss_none(self) -> None:
             self.dismiss(None)

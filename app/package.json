@@ -6,7 +6,8 @@
     "start": "expo start",
     "ios": "expo run:ios",
     "android": "expo run:android",
-    "web": "expo start --web"
+    "web": "expo start --web",
+    "postinstall": "node scripts/patch-react-native-css-metro.js"
   },
   "dependencies": {
     "@react-native-async-storage/async-storage": "2.1.2",
