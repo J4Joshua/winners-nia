@@ -322,12 +322,17 @@ def fetch_with_token(token: str) -> dict:
     recent_tracks = recent_resp.get("items", [])
     print(f"  → {len(recent_tracks)} plays")
 
+    print("Fetching liked songs (up to 2000) ...")
+    liked_track_ids = fetch_liked_tracks_http(token, limit=2000)
+    print(f"  → {len(liked_track_ids)} liked tracks")
+
     return {
         "display_name": display_name,
         "top_tracks": top_tracks,
         "audio_features": audio_features,
         "recent_tracks": recent_tracks,
         "genre_diversity_score": genre_div,
+        "liked_track_ids": liked_track_ids,
     }
 
 

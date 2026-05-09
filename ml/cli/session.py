@@ -58,10 +58,40 @@ DEFAULT_TOWER = Path("ml/export/my_user_tower.pt")
 
 # ── pure-Python session state ─────────────────────────────────────────────────
 
+def _vibe_to_song_features(vibe_name: str) -> np.ndarray:
+    """
+    Convert a 17-d vibe profile → 26-d Song Tower input.
+
+    The Song Tower was trained on song-level audio features (26-d).
+    We map the vibe's audio scalars into the same slots so the Song Tower
+    can project the vibe into its own embedding space — that's the only
+    space where vibe shifting is meaningful.
+
+    Vibe profile layout:  [0]dance [1]energy [2]valence [3]acoustic
+                          [4]instr [5]tempo_norm [6]loudness_norm …
+    Song Tower layout:    [12]dance [13]energy [15]acoustic [16]instr
+                          [18]valence [19]loudness [20]tempo …
+    """
+    vv = list(DEMO_USERS[vibe_name]["features"])
+    vec = np.zeros(26, dtype=np.float32)
+    vec[12] = vv[0]   # danceability
+    vec[13] = vv[1]   # energy
+    vec[15] = vv[3]   # acousticness
+    vec[16] = vv[4]   # instrumentalness
+    vec[18] = vv[2]   # valence
+    vec[19] = vv[6] if len(vv) > 6 else 0.5  # loudness_norm
+    vec[20] = vv[5]   # tempo_norm
+    vec[23] = 0.5     # popularity (neutral)
+    vec[24] = 0.5     # duration (neutral)
+    vec[25] = 4.0 / 7.0  # time_signature (4/4 most common)
+    return vec
+
+
 class SessionState:
     def __init__(
         self,
         profile: dict,
+        song_tower: nn.Module,
         user_tower: nn.Module,
         embeddings: np.ndarray,
         ids: np.ndarray,
@@ -72,6 +102,7 @@ class SessionState:
     ) -> None:
         self.user_name: str = profile.get("name", "User")
         self.base_features: list[float] = list(profile["features"])
+        self.song_tower = song_tower
         self.user_tower = user_tower
         self.embeddings = embeddings
         self.ids = ids
@@ -87,6 +118,9 @@ class SessionState:
         self.context_time: str | None = None
         self.feedback_log: list[str] = []
 
+        # Cache vibe embeddings so we don't recompute each keystroke
+        self._vibe_emb_cache: dict[str, np.ndarray] = {}
+
     def set_vibe(self, v: str | None) -> None: self.context_vibe = v
     def set_time(self, t: str | None) -> None: self.context_time = t
 
@@ -94,24 +128,38 @@ class SessionState:
         parts = [p for p in [self.context_time, self.context_vibe] if p]
         return " + ".join(parts) if parts else "none"
 
-    def _ctx_features(self) -> list[float]:
-        x = list(self.base_features)
+    def _user_embedding(self) -> np.ndarray:
+        """Raw user embedding — context applied separately in _query()."""
+        feats = list(self.base_features)
         if self.context_time:
             h = TIME_HOURS.get(self.context_time, 14)
-            x[IDX_PEAK_SIN] = math.sin(2 * math.pi * h / 24)
-            x[IDX_PEAK_COS] = math.cos(2 * math.pi * h / 24)
-        if self.context_vibe and self.context_vibe in DEMO_USERS:
-            vv = list(DEMO_USERS[self.context_vibe]["features"])
-            for i in AUDIO_INDICES:
-                if i < len(vv) and i < len(x):
-                    x[i] = 0.65 * x[i] + 0.35 * vv[i]
-        return x
-
-    def _query(self) -> np.ndarray:
-        x = torch.tensor([self._ctx_features()], dtype=torch.float32, device=self.device)
+            feats[IDX_PEAK_SIN] = math.sin(2 * math.pi * h / 24)
+            feats[IDX_PEAK_COS] = math.cos(2 * math.pi * h / 24)
+        x = torch.tensor([feats], dtype=torch.float32, device=self.device)
         self.user_tower.eval()
         with torch.no_grad():
             return self.user_tower(x).cpu().numpy()[0].astype(np.float32)
+
+    def _song_tower_vibe_embedding(self, vibe_name: str) -> np.ndarray:
+        """Project vibe through the Song Tower → a real point in embedding space."""
+        if vibe_name not in self._vibe_emb_cache:
+            vec = _vibe_to_song_features(vibe_name)
+            x = torch.tensor([vec], dtype=torch.float32, device=self.device)
+            self.song_tower.eval()
+            with torch.no_grad():
+                emb = self.song_tower(x).cpu().numpy()[0].astype(np.float32)
+            self._vibe_emb_cache[vibe_name] = emb
+        return self._vibe_emb_cache[vibe_name]
+
+    def _query(self) -> np.ndarray:
+        user_emb = self._user_embedding()
+        if self.context_vibe and self.context_vibe in DEMO_USERS:
+            vibe_emb = self._song_tower_vibe_embedding(self.context_vibe)
+            # Blend in embedding space: pull 40% toward vibe direction
+            blended = 0.60 * user_emb + 0.40 * vibe_emb
+            norm = np.linalg.norm(blended)
+            return (blended / (norm + 1e-8)).astype(np.float32)
+        return user_emb
 
     def recommendations(self) -> list[tuple[str, float, str, str]]:
         results = nearest_neighbors(self._query(), self.embeddings, self.ids, top_k=self.top_k)
@@ -196,49 +244,42 @@ def _build_app(
 
     class OnboardScreen(Screen):
         CSS = """
-        OnboardScreen {
-            align: center middle;
-            layout: vertical;
-        }
+        OnboardScreen { align: center middle; layout: vertical; }
         #card {
-            width: 66;
-            height: auto;
-            border: round $accent;
-            padding: 1 3;
+            width: 72; height: auto;
+            border: round $accent; padding: 2 3;
             background: $surface;
         }
-        #card Label { margin: 1 0 0 0; color: $text-muted; }
-        #card Input { margin: 0 0 1 0; }
+        #title  { text-style: bold; color: $accent; margin-bottom: 1; }
+        #note   { color: $text-muted; margin: 1 0; }
+        #hint   { color: $text-muted; text-style: italic; margin-top: 1; }
+        #error  { color: $error; margin-top: 1; }
+        #tok    { margin: 0 0 1 0; }
         #submit { margin-top: 1; width: 100%; }
-        #note { color: $text-muted; text-align: center; margin-top: 1; }
         """
 
         def compose(self) -> ComposeResult:
             yield Header()
             with Static(id="card"):
-                yield Label("🎵  Attune — connect your Spotify account", id="title")
-                yield Label("Client ID")
-                yield Input(placeholder="756b281cb305…", id="cid")
-                yield Label("Client Secret")
-                yield Input(placeholder="••••••••••••", id="cs", password=True)
-                yield Label("Redirect URI")
-                yield Input(value=redirect_uri, id="ruri")
-                yield Button("Connect →  (browser will open)", id="submit", variant="primary")
+                yield Label("🎵  Attune", id="title")
+                yield Label("Paste your Spotify Bearer token:", id="note")
+                yield Input(placeholder="BQB3…", id="tok")
+                yield Button("Connect →", id="submit", variant="primary")
                 yield Static(
-                    "[dim]Get credentials: developer.spotify.com → Dashboard → your app[/dim]",
-                    id="note",
+                    "[dim]Get a token: open.spotify.com → DevTools (F12) → Network tab\n"
+                    "→ any request to api.spotify.com → Authorization header → copy after 'Bearer '[/dim]",
+                    id="hint",
                 )
+                yield Static("", id="error")
             yield Footer()
 
         def on_button_pressed(self, e: Button.Pressed) -> None:
             if e.button.id == "submit":
-                cid = self.query_one("#cid", Input).value.strip()
-                cs = self.query_one("#cs", Input).value.strip()
-                ruri = self.query_one("#ruri", Input).value.strip()
-                if not cid or not cs:
-                    self.query_one("#note", Static).update("[red]Both Client ID and Secret are required[/red]")
+                token = self.query_one("#tok", Input).value.strip()
+                if not token:
+                    self.query_one("#error", Static).update("[red]Token cannot be empty[/red]")
                     return
-                self.app.push_screen(ProgressScreen(cid, cs, ruri))
+                self.app.push_screen(ProgressScreen(token))
 
     # ── progress screen ──────────────────────────────────────────────────────
 
@@ -246,16 +287,15 @@ def _build_app(
         CSS = """
         ProgressScreen { align: center middle; layout: vertical; }
         #log {
-            width: 70; height: 20;
-            border: round $primary;
-            padding: 1 2;
+            width: 72; height: 22;
+            border: round $primary; padding: 1 2;
             background: $surface;
         }
         """
 
-        def __init__(self, client_id: str, client_secret: str, ruri: str) -> None:
+        def __init__(self, token: str) -> None:
             super().__init__()
-            self._cid, self._cs, self._ruri = client_id, client_secret, ruri
+            self._token = token
             self._lines: list[str] = []
 
         def compose(self) -> ComposeResult:
@@ -264,12 +304,12 @@ def _build_app(
             yield Footer()
 
         def on_mount(self) -> None:
-            self._log("⏳  Connecting to Spotify…  (your browser will open)")
+            self._log("⏳  Starting…")
             self._run_onboarding()
 
         def _log(self, msg: str) -> None:
             self._lines.append(msg)
-            self.query_one("#log", Static).update("\n".join(self._lines[-18:]))
+            self.query_one("#log", Static).update("\n".join(self._lines[-20:]))
 
         @work(thread=True)
         def _run_onboarding(self) -> None:
@@ -277,7 +317,24 @@ def _build_app(
                 self.app.call_from_thread(self._log, msg)
 
             try:
-                # 1. Load catalog
+                # 1. Validate token + get username
+                log("🔐  Verifying token…")
+                import urllib.request, urllib.error as _ue
+                req = urllib.request.Request(
+                    "https://api.spotify.com/v1/me",
+                    headers={"Authorization": f"Bearer {self._token}"},
+                )
+                try:
+                    with urllib.request.urlopen(req, timeout=10) as r:
+                        import json as _json
+                        me = _json.loads(r.read())
+                except _ue.HTTPError as exc:
+                    self.app.call_from_thread(self._log, f"[red]Token rejected ({exc.code}). Paste a fresh token.[/red]")
+                    return
+                display_name = me.get("display_name", "User")
+                log(f"  ✓  Logged in as [bold]{display_name}[/bold]")
+
+                # 2. Load catalog
                 log("📦  Loading song catalog from Hub…")
                 model, embeddings, ids, names = load_artifacts_from_hub(hub_repo, device)
                 catalog["model"] = model
@@ -286,84 +343,47 @@ def _build_app(
                 catalog["names"] = names
                 log(f"  ✓  {len(ids):,} tracks  ({len(names):,} named)")
 
-                # 2. Spotify OAuth
-                log("🔐  Authenticating with Spotify…")
-                import spotipy
-                from spotipy.oauth2 import SpotifyOAuth
-                scope = "user-top-read user-read-recently-played user-library-read"
-                sp = spotipy.Spotify(auth_manager=SpotifyOAuth(
-                    client_id=self._cid,
-                    client_secret=self._cs,
-                    redirect_uri=self._ruri,
-                    scope=scope,
-                ))
-                me = sp.me()
-                display_name = me.get("display_name", "User")
-                log(f"  ✓  Logged in as [bold]{display_name}[/bold]")
-
-                # 3. Fetch listening data
+                # 3. Fetch Spotify data via token
                 from ml.cli.spotify_profile import (
-                    compute_user_features, fetch_audio_features_spotify,
-                    fetch_liked_tracks_http, genre_diversity_from_top_tracks,
-                    hydrate_top_tracks_http,
+                    compute_user_features, fetch_with_token,
                 )
-                from ml.cli.spotify_audio import spotify_access_token
+                log("🎵  Fetching your Spotify data…")
+                data = fetch_with_token(self._token)
+                log(f"  ✓  {len(data['top_tracks'])} top  ·  {len(data['recent_tracks'])} recent  ·  {len(data.get('liked_track_ids', []))} liked")
 
-                log("🎵  Fetching top tracks…")
-                top = sp.current_user_top_tracks(limit=50, time_range="medium_term").get("items", [])
-                top = hydrate_top_tracks_http(spotify_access_token(sp), top)
-                log(f"  ✓  {len(top)} top tracks")
-
-                log("🎵  Fetching audio features…")
-                af = fetch_audio_features_spotify(sp, [t["id"] for t in top if t.get("id")])
-
-                log("🎵  Fetching genre diversity…")
-                gdiv = genre_diversity_from_top_tracks(spotify_access_token(sp), top)
-
-                log("🎵  Fetching recently played…")
-                recent = sp.current_user_recently_played(limit=50).get("items", [])
-                log(f"  ✓  {len(recent)} plays")
-
-                log("🎵  Fetching liked songs (up to 2000)…")
-                liked = fetch_liked_tracks_http(spotify_access_token(sp), limit=2000)
-                log(f"  ✓  {len(liked)} liked tracks")
-
-                # 4. Compute profile + save JSON
+                # 4. Compute profile + save
                 profile = compute_user_features(
-                    top_tracks=top, audio_features=af, recent_tracks=recent,
-                    display_name=display_name, genre_diversity_score=gdiv,
-                    liked_track_ids=liked,
+                    top_tracks=data["top_tracks"],
+                    audio_features=data["audio_features"],
+                    recent_tracks=data["recent_tracks"],
+                    display_name=display_name,
+                    genre_diversity_score=data.get("genre_diversity_score"),
+                    liked_track_ids=data.get("liked_track_ids"),
                 )
-                json_path = DEFAULT_JSON
-                json_path.parent.mkdir(parents=True, exist_ok=True)
-                json_path.write_text(json.dumps(profile, indent=2))
-                log(f"  ✓  Profile saved → {json_path}")
+                DEFAULT_JSON.parent.mkdir(parents=True, exist_ok=True)
+                DEFAULT_JSON.write_text(_json.dumps(profile, indent=2))
+                log(f"  ✓  Profile saved → {DEFAULT_JSON}")
 
-                # 5. Train user tower
-                log("🧠  Training User Tower…")
-                from ml.training.train_user_cold import train_user_cold
+                # 5. Train User Tower
+                log("🧠  Training User Tower (cold-start)…")
                 import argparse
-                ta = argparse.Namespace(
-                    user_json=str(json_path),
+                from ml.training.train_user_cold import train_user_cold
+                train_user_cold(argparse.Namespace(
+                    user_json=str(DEFAULT_JSON),
                     output=str(DEFAULT_TOWER),
-                    hub_repo=None,
-                    embeddings=None,
-                    ids=None,
-                    positives="all",
-                    epochs=500,
-                    lr=5e-3,
-                    seed=42,
-                    min_positives=3,
+                    hub_repo=None, embeddings=None, ids=None,
+                    positives="all", epochs=500, lr=5e-3,
+                    seed=42, min_positives=3,
                     cpu=device.type == "cpu",
-                )
-                train_user_cold(ta)
+                ))
                 log(f"  ✓  User Tower saved → {DEFAULT_TOWER}")
 
-                # 6. Load tower + enter session
-                log("✨  All done! Entering session…")
+                # 6. Enter session
+                log("✨  All done — opening recommendations…")
                 user_tower = load_user_tower(DEFAULT_TOWER, device)
                 state = SessionState(
                     profile=profile,
+                    song_tower=catalog["model"],
                     user_tower=user_tower,
                     embeddings=embeddings,
                     ids=ids,
@@ -377,7 +397,8 @@ def _build_app(
                 )
 
             except Exception as exc:
-                self.app.call_from_thread(self._log, f"[red]Error: {exc}[/red]")
+                import traceback
+                self.app.call_from_thread(self._log, f"[red]Error: {exc}[/red]\n{traceback.format_exc()[-300:]}")
 
     # ── session screen ───────────────────────────────────────────────────────
 
@@ -518,11 +539,12 @@ def _build_app(
             def log(msg: str) -> None:
                 pass  # silent — goes directly to session
 
-            _, embeddings, ids, names = load_artifacts_from_hub(hub_repo, device)
+            song_model, embeddings, ids, names = load_artifacts_from_hub(hub_repo, device)
             profile = json.loads(user_json_path.read_text())
             user_tower = load_user_tower(tower_path, device)
             state = SessionState(
                 profile=profile,
+                song_tower=song_model,
                 user_tower=user_tower,
                 embeddings=embeddings,
                 ids=ids,
