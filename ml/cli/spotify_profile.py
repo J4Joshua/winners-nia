@@ -20,6 +20,38 @@ from pathlib import Path
 from ml.cli.spotify_audio import fetch_audio_features_http, fetch_audio_features_spotify, spotify_access_token
 
 
+def hydrate_top_tracks_http(access_token: str, top_tracks: list[dict]) -> list[dict]:
+    """Replace items with Full Track objects from GET /v1/tracks (top-tracks often omit popularity)."""
+    import json as json_lib
+    import urllib.request
+
+    ids = [str(t["id"]) for t in top_tracks if t.get("id")]
+    if not ids:
+        return top_tracks
+    by_id: dict[str, dict] = {}
+    try:
+        for i in range(0, len(ids), 50):
+            chunk = ids[i : i + 50]
+            ids_str = ",".join(chunk)
+            url = f"https://api.spotify.com/v1/tracks?ids={ids_str}"
+            req = urllib.request.Request(url, headers={"Authorization": f"Bearer {access_token}"})
+            with urllib.request.urlopen(req) as r:
+                body = json_lib.loads(r.read().decode())
+            for tr in body.get("tracks") or []:
+                if isinstance(tr, dict) and tr.get("id"):
+                    by_id[str(tr["id"])] = tr
+    except Exception:
+        return top_tracks
+    out: list[dict] = []
+    for t in top_tracks:
+        tid = t.get("id")
+        if tid and str(tid) in by_id:
+            out.append(by_id[str(tid)])
+        else:
+            out.append(t)
+    return out
+
+
 def primary_artist_ids_from_top_tracks(top_tracks: list[dict]) -> list[str]:
     out: list[str] = []
     seen: set[str] = set()
@@ -59,22 +91,32 @@ def fetch_artists_http(access_token: str, artist_ids: list[str]) -> list[dict]:
     return all_a
 
 
-def genre_diversity_from_top_tracks(access_token: str, top_tracks: list[dict]) -> float:
+def structural_diversity_top_tracks(top_tracks: list[dict]) -> float:
+    """How spread out primary artists are in top tracks (no extra API calls)."""
     aids = primary_artist_ids_from_top_tracks(top_tracks)
     if not aids:
         return 0.4
+    return min(len(aids) / 20.0, 1.0)
+
+
+def genre_diversity_from_top_tracks(access_token: str, top_tracks: list[dict]) -> float:
+    structural = structural_diversity_top_tracks(top_tracks)
+    aids = primary_artist_ids_from_top_tracks(top_tracks)
+    if not aids:
+        return structural
     try:
         artists = fetch_artists_http(access_token, aids)
     except Exception:
-        return 0.4
+        return structural
     genres_flat: list[str] = []
     for a in artists:
         for g in a.get("genres") or []:
             if isinstance(g, str) and g:
                 genres_flat.append(g)
     if not genres_flat:
-        return 0.4
-    return min(len(set(genres_flat)) / 15.0, 1.0)
+        return structural
+    from_tags = min(len(set(genres_flat)) / 15.0, 1.0)
+    return max(from_tags, structural)
 
 
 def track_metadata_debug(top_tracks: list[dict]) -> dict[str, float]:
@@ -232,6 +274,7 @@ def compute_user_features(
             "audio_features_count": len(valid_af),
             "recent_tracks_used": total_recent,
             "audio_features_ok": len(valid_af) > 0,
+            "unique_primary_artists": len(primary_artist_ids_from_top_tracks(top_tracks)),
             **track_metadata_debug(top_tracks),
         },
     }
@@ -256,6 +299,10 @@ def fetch_with_token(token: str) -> dict:
     print("Fetching top tracks (medium_term, 50) ...")
     top_resp = get("https://api.spotify.com/v1/me/top/tracks?time_range=medium_term&limit=50")
     top_tracks = top_resp.get("items", [])
+    print(f"  → {len(top_tracks)} tracks")
+
+    print("Hydrating top tracks (/v1/tracks, popularity & full fields) ...")
+    top_tracks = hydrate_top_tracks_http(token, top_tracks)
     print(f"  → {len(top_tracks)} tracks")
 
     track_ids = [t["id"] for t in top_tracks if t.get("id")]
@@ -310,6 +357,10 @@ def fetch_with_oauth(client_id: str, client_secret: str, redirect_uri: str) -> d
     print("Fetching top tracks (medium_term, 50) ...")
     top_resp = sp.current_user_top_tracks(limit=50, time_range="medium_term")
     top_tracks = top_resp.get("items", [])
+    print(f"  → {len(top_tracks)} tracks")
+
+    print("Hydrating top tracks (/v1/tracks, popularity & full fields) ...")
+    top_tracks = hydrate_top_tracks_http(spotify_access_token(sp), top_tracks)
     print(f"  → {len(top_tracks)} tracks")
 
     track_ids = [t["id"] for t in top_tracks if t.get("id")]

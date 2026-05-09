@@ -79,9 +79,9 @@ def train_one_epoch(
 
         with torch.amp.autocast("cuda", enabled=use_amp):
             _cudagraph_mark_step()
-            anchor = model(x)
+            anchor = model(x).clone()
             _cudagraph_mark_step()
-            positive = model(x)
+            positive = model(x).clone()
             loss = info_nce_loss(anchor, positive, temperature=tau)
 
         scaler.scale(loss).backward()
@@ -111,9 +111,9 @@ def evaluate(
         x = x.to(device, non_blocking=True)
         with torch.amp.autocast("cuda", enabled=use_amp):
             _cudagraph_mark_step()
-            anchor = model(x)
+            anchor = model(x).clone()
             _cudagraph_mark_step()
-            positive = model(x)
+            positive = model(x).clone()
             loss = info_nce_loss(anchor, positive, temperature=tau)
         total_loss += loss.item()
 
@@ -252,8 +252,9 @@ def run_training(args: Namespace) -> None:
     print(f"Model parameters: {total_params:,}")
 
     if args.compile and hasattr(torch, "compile"):
-        print("Compiling model with torch.compile (mode=reduce-overhead)...")
-        model = torch.compile(model, mode="reduce-overhead")
+        # default: stable with double-forward InfoNCE; reduce-overhead CUDAGraphs can alias buffers.
+        print("Compiling model with torch.compile (mode=default)...")
+        model = torch.compile(model, mode="default")
 
     optimizer = torch.optim.AdamW(
         model.parameters(),

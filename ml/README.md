@@ -26,23 +26,23 @@ Training code needs **PyTorch 2.2+** (`torch.amp`, optional `torch.compile`). Re
 
 **RunPod PyTorch templates** (pick an image, then `./ml/scripts/setup_training_env.sh --extras-only` so pip does not replace the container’s CUDA-matched build):
 
-| Template (example tag) | PyTorch | CUDA | Notes |
-|-------------------------|---------|------|--------|
-| `runpod/pytorch:2.4.0-py3.11-cuda12.4.1-devel-ubuntu22.04` | **2.4.0** | 12.4 | **Default recommendation** |
-| `runpod/pytorch:2.2.0-py3.10-cuda12.1.1-devel-ubuntu22.04` | 2.2.0 | 12.1 | Fine |
-| `runpod/pytorch:2.1.0-py3.10-cuda11.8.0-devel-ubuntu22.04` | 2.1.0 | 11.8 | Older stack |
-| PyTorch 2.8.x templates | varies | varies | Confirm exact tag in RunPod UI |
+| Template (example tag)                                     | PyTorch   | CUDA   | Notes                          |
+| ---------------------------------------------------------- | --------- | ------ | ------------------------------ |
+| `runpod/pytorch:2.4.0-py3.11-cuda12.4.1-devel-ubuntu22.04` | **2.4.0** | 12.4   | **Default recommendation**     |
+| `runpod/pytorch:2.2.0-py3.10-cuda12.1.1-devel-ubuntu22.04` | 2.2.0     | 12.1   | Fine                           |
+| `runpod/pytorch:2.1.0-py3.10-cuda11.8.0-devel-ubuntu22.04` | 2.1.0     | 11.8   | Older stack                    |
+| PyTorch 2.8.x templates                                    | varies    | varies | Confirm exact tag in RunPod UI |
 
 Files: `ml/requirements.txt` (includes torch for laptop/bare venv), `ml/requirements-train-extras.txt` (no torch — for RunPod).
 
 ### Tokens (where to get them)
 
-| Token | Used for | Where |
-|-------|-----------|--------|
-| **Spotify access token** | `python -m ml spotify` | Spotify removed the old **Web API Console** “Get Token” pages. Use either: **(A)** [Developer Dashboard](https://developer.spotify.com/dashboard) → create an app → **Settings** → add a **Redirect URI** that matches `--redirect-uri` (default `http://127.0.0.1:8888/callback` or `http://localhost:8888/callback`) → `pip install spotipy` → `python -m ml spotify --client-id … --client-secret …` (opens browser, OAuth with scopes `user-top-read` + `user-read-recently-played`). **(B)** Paste a **Bearer** token from any OAuth flow that obtained those scopes: `python -m ml spotify --token …` (tokens expire, ~1 hour). See [Authorization code flow](https://developer.spotify.com/documentation/web-api/tutorials/code-flow). |
-| **`HF_TOKEN`** (Hugging Face) | Uploading models (`ml train --push-to-hub`), gated datasets, Hub downloads if needed | [huggingface.co/settings/tokens](https://huggingface.co/settings/tokens) — create a token with **write** if you push models. |
+| Token                         | Used for                                                                             | Where                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
+| ----------------------------- | ------------------------------------------------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Spotify access token**      | `python -m ml spotify`                                                               | Spotify removed the old **Web API Console** “Get Token” pages. Use either: **(A)** [Developer Dashboard](https://developer.spotify.com/dashboard) → create an app → **Settings** → add a **Redirect URI** that matches `--redirect-uri` (default `http://127.0.0.1:8888/callback` or `http://localhost:8888/callback`) → `pip install spotipy` → `python -m ml spotify --client-id … --client-secret …` (opens browser, OAuth with scopes `user-top-read` + `user-read-recently-played`). **(B)** Paste a **Bearer** token from any OAuth flow that obtained those scopes: `python -m ml spotify --token …` (tokens expire, ~1 hour). See [Authorization code flow](https://developer.spotify.com/documentation/web-api/tutorials/code-flow). |
+| **`HF_TOKEN`** (Hugging Face) | Uploading models (`ml train --push-to-hub`), gated datasets, Hub downloads if needed | [huggingface.co/settings/tokens](https://huggingface.co/settings/tokens) — create a token with **write** if you push models.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
 
-These are **different** products: Spotify proves *your listening account*; Hugging Face proves *your HF account*.
+These are **different** products: Spotify proves _your listening account_; Hugging Face proves _your HF account_.
 
 ### Spotify `audio-features` returns 403
 
@@ -50,9 +50,9 @@ Some developer apps no longer get `/v1/audio-features` (Spotify returns **403**)
 
 ### Weather and “context”
 
-The **full Attune design** uses a separate **Context Encoder** (time, location buckets, **weather**, skips, etc.) that *shifts* the user vector before search. That model is **not implemented** in this repo yet—only **Song Tower** + **User Tower** (17-d profile → 128-d). So you **cannot** pass weather into `ml run` today and get a context-conditioned embedding from this package.
+The **full Attune design** uses a separate **Context Encoder** (time, location buckets, **weather**, skips, etc.) that _shifts_ the user vector before search. That model is **not implemented** in this repo yet—only **Song Tower** + **User Tower** (17-d profile → 128-d). So you **cannot** pass weather into `ml run` today and get a context-conditioned embedding from this package.
 
-What you *can* do now: train a **User Tower** that matches **your** Spotify taste (cold start), then run retrieval and inspect printed track IDs.
+What you _can_ do now: train a **User Tower** that matches **your** Spotify taste (cold start), then run retrieval and inspect printed track IDs.
 
 ### GPU pod — Song Tower train
 
@@ -67,14 +67,14 @@ python -m ml train --gpu-preset h100 --output-dir ml/export
 
 All commands are `python -m ml <subcommand> ...` from the repository root.
 
-| Subcommand | Purpose |
-|------------|---------|
-| `train` | Train Song Tower on the HF dataset, export TorchScript + embeddings, optionally push to Hugging Face Hub |
-| `run` | Load artifacts (local or Hub), embed user profile, nearest-neighbor search over the catalog |
-| `faiss` | Build `IndexFlatIP` from exported embeddings |
-| `hub` | Upload `ml/export/` artifacts to a Hugging Face **model** repo |
-| `train-user` | Cold-start **User Tower** from `ml spotify` JSON + Song embeddings (Hub or local) |
-| `spotify` | Pull your top/recent tracks via Web API → write `my_user.json` (17-d features + track IDs) |
+| Subcommand   | Purpose                                                                                                  |
+| ------------ | -------------------------------------------------------------------------------------------------------- |
+| `train`      | Train Song Tower on the HF dataset, export TorchScript + embeddings, optionally push to Hugging Face Hub |
+| `run`        | Load artifacts (local or Hub), embed user profile, nearest-neighbor search over the catalog              |
+| `faiss`      | Build `IndexFlatIP` from exported embeddings                                                             |
+| `hub`        | Upload `ml/export/` artifacts to a Hugging Face **model** repo                                           |
+| `train-user` | Cold-start **User Tower** from `ml spotify` JSON + Song embeddings (Hub or local)                        |
+| `spotify`    | Pull your top/recent tracks via Web API → write `my_user.json` (17-d features + track IDs)               |
 
 ```bash
 python -m ml                    # usage
@@ -151,12 +151,12 @@ python -m ml.cli.test_user --song-tower ml/export/song_tower_v1.pt ...   # same 
 
 InfoNCE quality scales with **in-batch negatives** (batch size). Prefer GPUs with lots of VRAM.
 
-| Priority | GPU | Preset | Batch | Notes |
-|----------|-----|--------|-------|--------|
-| **Best** | **NVIDIA H100** 80GB | `--gpu-preset h100` | 2048 | Fast wall-clock + largest batches; enables `torch.compile` in preset |
-| Strong | **NVIDIA A100** 40/80GB | `--gpu-preset a100` | 1024 | Great cost/perf on many clouds |
-| Good | **RTX 4090** 24GB | `--gpu-preset 4090` | 512 | Default consumer; fine for hackathon timelines |
-| Budget | **NVIDIA L4** 24GB | `--gpu-preset l4` | 256 | Common on serverless / inference hosts |
+| Priority | GPU                     | Preset              | Batch | Notes                                                                |
+| -------- | ----------------------- | ------------------- | ----- | -------------------------------------------------------------------- |
+| **Best** | **NVIDIA H100** 80GB    | `--gpu-preset h100` | 2048  | Fast wall-clock + largest batches; enables `torch.compile` in preset |
+| Strong   | **NVIDIA A100** 40/80GB | `--gpu-preset a100` | 1024  | Great cost/perf on many clouds                                       |
+| Good     | **RTX 4090** 24GB       | `--gpu-preset 4090` | 512   | Default consumer; fine for hackathon timelines                       |
+| Budget   | **NVIDIA L4** 24GB      | `--gpu-preset l4`   | 256   | Common on serverless / inference hosts                               |
 
 Rough Song Tower train time (30 epochs, ~114k tracks): **~5–10 min** (H100), **~8–15 min** (A100), **~20–40 min** (4090), **~30–60 min** (L4). Use `--gpu-preset <name>` so batch size, DataLoader workers, and compile flags stay aligned with your card.
 
@@ -196,20 +196,20 @@ ml/
 
 ## Architecture overview (from product spec)
 
-| Block | Role |
-|-------|------|
-| **Song Tower** | Shared frozen encoder; trained once on HF catalog |
-| **User Tower** | Per-user 17-d taste → 128-d (cold train + online updates in prod) |
-| **Context / GRU** | Planned: context shift + session query (not in this CLI yet) |
+| Block             | Role                                                              |
+| ----------------- | ----------------------------------------------------------------- |
+| **Song Tower**    | Shared frozen encoder; trained once on HF catalog                 |
+| **User Tower**    | Per-user 17-d taste → 128-d (cold train + online updates in prod) |
+| **Context / GRU** | Planned: context shift + session query (not in this CLI yet)      |
 
 Retrieval in production: user/context → FAISS (~500 candidates) → rank → interleave known/new tracks.
 
 ## Demo user profiles (`ml run --demo-user`)
 
-| Name | Vibe |
-|------|------|
-| `pop` | Upbeat / afternoon-shaped |
+| Name    | Vibe                      |
+| ------- | ------------------------- |
+| `pop`   | Upbeat / afternoon-shaped |
 | `chill` | Acoustic / evening-shaped |
-| `hype` | High energy / fast tempo |
+| `hype`  | High energy / fast tempo  |
 
 For **your** account, use `ml spotify` then `ml run --user-json ...`.
