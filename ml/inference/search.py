@@ -25,6 +25,20 @@ def nearest_neighbors(
     q = query / (np.linalg.norm(query) + 1e-8)
     emb = embeddings / (np.linalg.norm(embeddings, axis=1, keepdims=True) + 1e-8)
     scores = emb @ q
-    top_idx = np.argpartition(scores, -top_k)[-top_k:]
+
+    # Fetch more candidates than needed so deduplication doesn't shrink results below top_k
+    fetch = min(top_k * 4, len(scores))
+    top_idx = np.argpartition(scores, -fetch)[-fetch:]
     top_idx = top_idx[np.argsort(scores[top_idx])[::-1]]
-    return [(str(ids[i]), float(scores[i])) for i in top_idx]
+
+    # Deduplicate: keep first (highest-score) occurrence of each track ID
+    seen: set[str] = set()
+    out: list[tuple[str, float]] = []
+    for i in top_idx:
+        tid = str(ids[i])
+        if tid not in seen:
+            seen.add(tid)
+            out.append((tid, float(scores[i])))
+        if len(out) == top_k:
+            break
+    return out

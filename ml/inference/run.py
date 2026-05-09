@@ -18,6 +18,7 @@ def run_inference(args: Namespace) -> None:
     device = resolve_device(getattr(args, "device", None))
     print(f"Device: {device}")
 
+    hub_names: dict[str, str] = {}
     tower_path = getattr(args, "song_tower", None)
     if tower_path:
         emb_path = getattr(args, "embeddings", None)
@@ -31,7 +32,7 @@ def run_inference(args: Namespace) -> None:
         print(f"Embeddings: {emb_path}")
     else:
         repo = getattr(args, "hub_repo", None) or DEFAULT_HUB_MODEL_REPO
-        song_model, embeddings, ids = load_artifacts_from_hub(repo, device)
+        song_model, embeddings, ids, hub_names = load_artifacts_from_hub(repo, device)
         print(f"Loaded from Hugging Face Hub: https://huggingface.co/{repo}")
 
     print(f"Shape: {embeddings.shape}  tracks: {len(ids):,}\n")
@@ -53,25 +54,27 @@ def run_inference(args: Namespace) -> None:
     )
     search_ms = (time.perf_counter() - t0) * 1000
 
-    # Optionally resolve track IDs → "Title — Artist" via Spotify API
+    # Use names from Hub (built at training time from the HF dataset).
+    # Fall back to Spotify API only if Hub names file is missing.
     import os
-    spotify_token = getattr(args, "spotify_token", None)
-    client_id = getattr(args, "client_id", None)
-    client_secret = getattr(args, "client_secret", None)
-    names: dict[str, str] = {}
-    wants_names = (
-        spotify_token
-        or os.environ.get("SPOTIFY_TOKEN")
-        or client_id or os.environ.get("SPOTIFY_CLIENT_ID")
-    )
-    if wants_names:
-        from ml.cli.spotify_tracks import resolve_track_names
-        names = resolve_track_names(
-            [tid for tid, _ in results],
-            token=spotify_token,
-            client_id=client_id,
-            client_secret=client_secret,
+    names: dict[str, str] = hub_names
+    if not names:
+        spotify_token = getattr(args, "spotify_token", None)
+        client_id = getattr(args, "client_id", None)
+        client_secret = getattr(args, "client_secret", None)
+        wants_api = (
+            spotify_token
+            or os.environ.get("SPOTIFY_TOKEN")
+            or client_id or os.environ.get("SPOTIFY_CLIENT_ID")
         )
+        if wants_api:
+            from ml.cli.spotify_tracks import resolve_track_names
+            names = resolve_track_names(
+                [tid for tid, _ in results],
+                token=spotify_token,
+                client_id=client_id,
+                client_secret=client_secret,
+            )
 
     has_names = bool(names)
     col_w = 52 if has_names else 0

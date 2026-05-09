@@ -45,6 +45,7 @@ def push_song_tower(
         "song_tower_best.pt": output_dir / "song_tower_best.pt",
         "song_embeddings_v1.npy": output_dir / "song_embeddings_v1.npy",
         "song_ids_v1.npy": output_dir / "song_ids_v1.npy",
+        "song_names_v1.json": output_dir / "song_names_v1.json",
     }
 
     faiss_path = output_dir / "faiss_song_v1.index"

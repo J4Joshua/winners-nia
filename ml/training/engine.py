@@ -158,7 +158,10 @@ def export_embeddings(
     device: torch.device,
     batch_size: int,
     num_workers: int,
+    track_names: dict[str, str] | None = None,
 ) -> tuple[np.ndarray, list[str]]:
+    import json as _json
+
     inner = _unwrap_for_export(model)
     inner.eval()
 
@@ -184,6 +187,12 @@ def export_embeddings(
     np.save(output_dir / "song_embeddings_v1.npy", embeddings)
     np.save(output_dir / "song_ids_v1.npy", ids_array)
     print(f"Saved embeddings {embeddings.shape} → {output_dir}/song_embeddings_v1.npy")
+
+    if track_names:
+        names_path = output_dir / "song_names_v1.json"
+        names_path.write_text(_json.dumps(track_names, ensure_ascii=False))
+        print(f"Saved track names ({len(track_names):,}) → {names_path}")
+
     return embeddings, all_ids
 
 
@@ -215,7 +224,7 @@ def run_training(args: Namespace) -> None:
     ckpt_dir = output_dir / "checkpoints"
     ckpt_dir.mkdir(parents=True, exist_ok=True)
 
-    train_ds, val_ds, _all_ids = load_spotify_dataset(
+    train_ds, val_ds, _all_ids, track_names = load_spotify_dataset(
         val_fraction=args.val_fraction,
         seed=args.seed,
         cache_dir=args.hf_cache,
@@ -318,6 +327,7 @@ def run_training(args: Namespace) -> None:
             device,
             batch_size=args.embed_batch_size,
             num_workers=args.num_workers,
+            track_names=track_names,
         )
 
     if args.push_to_hub:

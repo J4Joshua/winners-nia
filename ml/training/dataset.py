@@ -99,12 +99,13 @@ def load_spotify_dataset(
     seed: int = 42,
     cache_dir: str | None = None,
     revision: str | None = None,
-) -> tuple[SpotifyTracksDataset, SpotifyTracksDataset, list[str]]:
+) -> tuple[SpotifyTracksDataset, SpotifyTracksDataset, list[str], dict[str, str]]:
     """
     Download + preprocess the HF dataset; split 90/10 by track ID.
 
     Returns:
-        train_ds, val_ds, all_track_ids
+        train_ds, val_ds, all_track_ids, track_names
+        where track_names is {track_id: "Track Name — Artist"}
     """
     from datasets import load_dataset  # type: ignore
 
@@ -118,18 +119,29 @@ def load_spotify_dataset(
 
     features_list: list[np.ndarray] = []
     track_ids: list[str] = []
+    track_names: dict[str, str] = {}
 
     print(f"Extracting features from {len(hf):,} rows...")
     for row in hf:
         feat = extract_song_features(row)
         if feat is None:
             continue
-        tid = row.get("track_id") or row.get("id") or str(len(track_ids))
+        tid = str(row.get("track_id") or row.get("id") or len(track_ids))
         features_list.append(feat)
-        track_ids.append(str(tid))
+        track_ids.append(tid)
+
+        if tid not in track_names:
+            name = str(row.get("track_name") or row.get("name") or "?")
+            artists = row.get("artists") or ""
+            # artists can be a string like "['Artist A', 'Artist B']" or plain "Artist"
+            if isinstance(artists, list):
+                artist = artists[0] if artists else "?"
+            else:
+                artist = str(artists).strip("[]'\" ")
+            track_names[tid] = f"{name} — {artist}"
 
     features = np.stack(features_list, axis=0)  # (N, 26)
-    print(f"  → kept {len(features):,} tracks after filtering")
+    print(f"  → kept {len(features):,} tracks  ({len(track_names):,} unique IDs)")
 
     # Val split by unique track ID (prevents leakage across duplicate rows)
     unique_ids = list(dict.fromkeys(track_ids))  # preserve order, deduplicate
@@ -145,4 +157,4 @@ def load_spotify_dataset(
     val_ds = SpotifyTracksDataset(features[val_idx], [track_ids[i] for i in val_idx])
 
     print(f"  → train: {len(train_ds):,}  val: {len(val_ds):,}")
-    return train_ds, val_ds, track_ids
+    return train_ds, val_ds, track_ids, track_names
