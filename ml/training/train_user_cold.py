@@ -36,7 +36,26 @@ def load_catalog_from_hub(repo_id: str) -> tuple[np.ndarray, np.ndarray]:
     return embeddings, ids
 
 
+def _recency_weight(added_at: str, now: "datetime | None" = None) -> float:
+    """Convert an ISO-8601 added_at string to a recency weight [0.2, 1.0]."""
+    from datetime import datetime, timezone, timedelta
+    if not added_at:
+        return 0.5
+    if now is None:
+        now = datetime.now(timezone.utc)
+    try:
+        ts = datetime.fromisoformat(added_at.replace("Z", "+00:00"))
+        age_days = max(0, (now - ts).days)
+    except (ValueError, TypeError):
+        return 0.5
+    if age_days <= 30:   return 1.0
+    if age_days <= 90:   return 0.8
+    if age_days <= 365:  return 0.5
+    return 0.2
+
+
 def resolve_positive_ids(profile: dict, prefer: str) -> list[str]:
+    """Return a deduplicated list of positive track IDs from the profile."""
     if prefer == "top":
         return [str(x) for x in profile.get("top_track_ids") or []]
     if prefer == "recent":
@@ -44,12 +63,18 @@ def resolve_positive_ids(profile: dict, prefer: str) -> list[str]:
     if prefer == "liked":
         return [str(x) for x in profile.get("liked_track_ids") or []]
 
-    # "all": top + recent + liked, deduplicated, order preserved
+    # "all": top + recent + liked + playlist tracks, deduplicated
     sources = (
         list(profile.get("top_track_ids") or [])
         + list(profile.get("recent_track_ids") or [])
         + list(profile.get("liked_track_ids") or [])
     )
+    for pl in profile.get("playlists") or []:
+        for item in pl.get("tracks") or []:
+            tid = item.get("track_id") if isinstance(item, dict) else str(item)
+            if tid:
+                sources.append(str(tid))
+
     out: list[str] = []
     seen: set[str] = set()
     for x in sources:
@@ -60,25 +85,70 @@ def resolve_positive_ids(profile: dict, prefer: str) -> list[str]:
     return out
 
 
+def resolve_positive_weights(profile: dict, positive_ids: list[str]) -> np.ndarray:
+    """
+    Return per-positive recency weights for ranking loss weighting.
+
+    top_track_ids:    1.0  (Spotify's own relevance-ranked signal)
+    recent_track_ids: 0.9  (very recent activity)
+    liked_track_ids:  0.7  (library save, less time-sensitive)
+    playlist tracks:  0.2–1.0 based on added_at date
+    """
+    from datetime import datetime, timezone
+    now = datetime.now(timezone.utc)
+
+    top_set    = set(str(x) for x in profile.get("top_track_ids") or [])
+    recent_set = set(str(x) for x in profile.get("recent_track_ids") or [])
+    liked_set  = set(str(x) for x in profile.get("liked_track_ids") or [])
+
+    # Build playlist track → best recency weight mapping
+    pl_weights: dict[str, float] = {}
+    for pl in profile.get("playlists") or []:
+        for item in pl.get("tracks") or []:
+            if not isinstance(item, dict):
+                continue
+            tid = str(item.get("track_id", ""))
+            w = _recency_weight(item.get("added_at", ""), now)
+            if tid and w > pl_weights.get(tid, 0):
+                pl_weights[tid] = w
+
+    weights = []
+    for tid in positive_ids:
+        if tid in top_set:
+            weights.append(1.0)
+        elif tid in recent_set:
+            weights.append(0.9)
+        elif tid in liked_set:
+            weights.append(0.7)
+        else:
+            weights.append(pl_weights.get(tid, 0.5))
+
+    arr = np.array(weights, dtype=np.float32)
+    return arr / arr.sum()  # normalise to sum=1
+
+
 def _ranking_loss(
     user_emb: torch.Tensor,    # (1, 128) L2-normalized
     pos_embs: torch.Tensor,    # (P, 128) L2-normalized
     neg_embs: torch.Tensor,    # (N, 128) L2-normalized
+    pos_weights: torch.Tensor, # (P,) summing to 1 — recency-based importance weights
     temperature: float = 0.07,
 ) -> torch.Tensor:
     """
-    Multi-positive InfoNCE: user embedding should be close to ALL positives
-    and far from all negatives.
+    Weighted multi-positive InfoNCE.
 
-    Loss = -1/P * sum_p log [exp(u·p/tau) / (sum_p' exp(u·p'/tau) + sum_n exp(u·n/tau))]
+    Loss = -sum_p w_p * log [exp(u·p/tau) / (sum_p' exp + sum_n exp)]
+
+    Weights encode recency: recently-added playlist tracks, top tracks, and
+    recent plays matter more than tracks added years ago to the library.
     """
     u = user_emb  # (1, 128)
     pos_sims = (u @ pos_embs.T).squeeze(0) / temperature   # (P,)
     neg_sims = (u @ neg_embs.T).squeeze(0) / temperature   # (N,)
-
     all_sims = torch.cat([pos_sims, neg_sims])              # (P+N,)
     log_denom = torch.logsumexp(all_sims, dim=0)
-    loss = -(pos_sims - log_denom).mean()
+    # Weighted average of per-positive log-probs
+    loss = -(pos_weights * (pos_sims - log_denom)).sum()
     return loss
 
 
@@ -112,11 +182,13 @@ def train_user_cold(args: argparse.Namespace) -> None:
     }
 
     rows: list[int] = []
+    matched_ids: list[str] = []
     missing: list[str] = []
     for tid in positive_ids:
         row = id_to_row.get(str(tid))
         if row is not None:
             rows.append(row)
+            matched_ids.append(str(tid))
         else:
             missing.append(tid)
 
@@ -129,15 +201,18 @@ def train_user_cold(args: argparse.Namespace) -> None:
             "Dataset may use different IDs — try retraining Song Tower with your market's data."
         )
 
-    pos_embs_np = embeddings[rows]                          # (P, 128)
+    pos_embs_np = embeddings[rows]                              # (P, 128)
+    pos_weights = resolve_positive_weights(profile, matched_ids)  # (P,) summing to 1
+
     # Negative pool: all catalog rows NOT in the positive set
     pos_set = set(rows)
     all_rows = np.arange(len(embeddings))
     neg_pool = all_rows[~np.isin(all_rows, list(pos_set))]  # (N_total,)
 
     device = torch.device("cuda" if torch.cuda.is_available() and not getattr(args, "cpu", False) else "cpu")
-    x         = torch.tensor([feats], dtype=torch.float32, device=device)          # (1, 17)
-    pos_embs_t = torch.tensor(pos_embs_np, dtype=torch.float32, device=device)    # (P, 128)
+    x           = torch.tensor([feats],       dtype=torch.float32, device=device)  # (1, 17)
+    pos_embs_t  = torch.tensor(pos_embs_np,  dtype=torch.float32, device=device)  # (P, 128)
+    pos_weights_t = torch.tensor(pos_weights, dtype=torch.float32, device=device)  # (P,)
 
     torch.manual_seed(args.seed)
     model = UserTower(dropout=0.0).to(device)
@@ -164,7 +239,7 @@ def train_user_cold(args: argparse.Namespace) -> None:
             embeddings[neg_idx], dtype=torch.float32, device=device
         )
 
-        loss = _ranking_loss(user_emb, pos_embs_t, neg_embs_t, temperature=0.07)
+        loss = _ranking_loss(user_emb, pos_embs_t, neg_embs_t, pos_weights_t, temperature=0.07)
         loss.backward()
         torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
         opt.step()

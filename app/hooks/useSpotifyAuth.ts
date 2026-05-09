@@ -1,64 +1,38 @@
-import { useCallback, useState } from "react";
-import { useAction } from "convex/react";
+import { useCallback } from "react";
+import { useAction, useMutation } from "convex/react";
 import { api } from "../convex/_generated/api";
-import type { Id } from "../convex/_generated/dataModel";
 import { useSpotifyAuthRequest } from "../lib/spotify";
-import * as AuthSession from "expo-auth-session";
-import AsyncStorage from "@react-native-async-storage/async-storage";
 
-const USER_ID_KEY = "@attune/userId";
-
-export function useSpotifyAuth() {
-  const [userId, setUserId] = useState<Id<"users"> | null>(null);
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-
+export function useSpotifyAuth(setSession: (token: string | null) => Promise<void>) {
   const { request, promptAsync, redirectUri } = useSpotifyAuthRequest();
   const linkSpotify = useAction(api.spotify.link);
-
-  const loadStoredUserId = useCallback(async () => {
-    const stored = await AsyncStorage.getItem(USER_ID_KEY);
-    if (stored) setUserId(stored as Id<"users">);
-    return stored as Id<"users"> | null;
-  }, []);
+  const startOnboarding = useMutation(api.onboarding.startOnboarding);
 
   const login = useCallback(async () => {
-    if (!request) return;
-    setLoading(true);
-    setError(null);
+    if (!request) throw new Error("Auth request not ready");
 
-    try {
-      const result = await promptAsync();
+    const result = await promptAsync();
+    if (result.type === "cancel") return null;
+    if (result.type !== "success") throw new Error("Authentication failed");
 
-      if (result.type !== "success") {
-        setError(result.type === "cancel" ? null : "Authentication failed");
-        return;
-      }
+    const codeVerifier = request.codeVerifier;
+    if (!codeVerifier) throw new Error("Missing PKCE code verifier");
 
-      const { code } = result.params;
-      const codeVerifier = request.codeVerifier;
+    const { sessionToken } = await linkSpotify({
+      code: result.params.code,
+      redirectUri,
+      codeVerifier,
+    });
 
-      if (!codeVerifier) throw new Error("Missing code verifier");
+    await setSession(sessionToken);
 
-      const { userId: newUserId } = await linkSpotify({
-        code,
-        redirectUri,
-        codeVerifier,
-      });
+    // Kick off onboarding — errors are surfaced via the onboarding job query
+    await startOnboarding({ sessionToken }).catch((err) => {
+      console.warn("[useSpotifyAuth] startOnboarding failed:", err);
+    });
 
-      await AsyncStorage.setItem(USER_ID_KEY, newUserId);
-      setUserId(newUserId as Id<"users">);
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "Login failed");
-    } finally {
-      setLoading(false);
-    }
-  }, [request, promptAsync, redirectUri, linkSpotify]);
+    return sessionToken;
+  }, [request, promptAsync, redirectUri, linkSpotify, setSession, startOnboarding]);
 
-  const logout = useCallback(async () => {
-    await AsyncStorage.removeItem(USER_ID_KEY);
-    setUserId(null);
-  }, []);
-
-  return { userId, loading, error, login, logout, loadStoredUserId };
+  return { login, isReady: !!request };
 }

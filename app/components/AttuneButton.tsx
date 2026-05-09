@@ -1,6 +1,5 @@
-import { useEffect } from "react";
-import { View, Text } from "../src/tw";
-import { Pressable as RNPressable } from "react-native";
+import { useEffect, useRef } from "react";
+import { View, Text, Pressable } from "../src/tw";
 import Animated, {
   useSharedValue,
   useAnimatedStyle,
@@ -14,15 +13,16 @@ import * as Haptics from "expo-haptics";
 import { Platform } from "react-native";
 
 interface AttuneButtonProps {
-  onPress: () => void;
+  onPress: () => void | Promise<void>;
   loading?: boolean;
 }
 
 function PulseRings() {
   const ring1 = useSharedValue(1);
   const ring2 = useSharedValue(1);
-  const op1 = useSharedValue(0.4);
-  const op2 = useSharedValue(0.4);
+  const op1 = useSharedValue(0.35);
+  const op2 = useSharedValue(0.35);
+  const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   useEffect(() => {
     ring1.value = withRepeat(
@@ -34,15 +34,12 @@ function PulseRings() {
       false
     );
     op1.value = withRepeat(
-      withSequence(
-        withTiming(0.35, { duration: 0 }),
-        withTiming(0, { duration: 1400 })
-      ),
+      withSequence(withTiming(0.35, { duration: 0 }), withTiming(0, { duration: 1400 })),
       -1,
       false
     );
 
-    setTimeout(() => {
+    timerRef.current = setTimeout(() => {
       ring2.value = withRepeat(
         withSequence(
           withTiming(1, { duration: 0 }),
@@ -52,14 +49,15 @@ function PulseRings() {
         false
       );
       op2.value = withRepeat(
-        withSequence(
-          withTiming(0.35, { duration: 0 }),
-          withTiming(0, { duration: 1400 })
-        ),
+        withSequence(withTiming(0.35, { duration: 0 }), withTiming(0, { duration: 1400 })),
         -1,
         false
       );
     }, 700);
+
+    return () => {
+      if (timerRef.current) clearTimeout(timerRef.current);
+    };
   }, []);
 
   const s1 = useAnimatedStyle(() => ({
@@ -129,7 +127,7 @@ export function AttuneButton({ onPress, loading = false }: AttuneButtonProps) {
     scale.value = withSpring(0.93, { damping: 8, stiffness: 350 }, () => {
       scale.value = withSpring(1, { damping: 10, stiffness: 280 });
     });
-    onPress();
+    await onPress();
   };
 
   return (
@@ -139,7 +137,7 @@ export function AttuneButton({ onPress, loading = false }: AttuneButtonProps) {
         {!loading && <PulseRings />}
 
         <Animated.View style={buttonStyle}>
-          <RNPressable
+          <Pressable
             onPress={handlePress}
             disabled={loading}
             style={{
@@ -159,7 +157,7 @@ export function AttuneButton({ onPress, loading = false }: AttuneButtonProps) {
                 <Text className="text-5xl">♪</Text>
               </View>
             )}
-          </RNPressable>
+          </Pressable>
         </Animated.View>
       </View>
 

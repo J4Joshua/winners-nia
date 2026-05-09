@@ -1,5 +1,6 @@
 import { mutation } from "./_generated/server";
 import { v } from "convex/values";
+import { requireSession } from "./lib/auth";
 
 const weatherValidator = v.optional(
   v.object({
@@ -50,14 +51,14 @@ const eventValidator = v.object({
 
 export const appendBatch = mutation({
   args: {
-    userId: v.id("users"),
+    sessionToken: v.string(),
     events: v.array(eventValidator),
   },
-  handler: async (ctx, { userId, events }) => {
-    const user = await ctx.db.get(userId);
-    if (!user) throw new Error("User not found");
+  handler: async (ctx, { sessionToken, events }) => {
+    const user = await requireSession(ctx, sessionToken);
 
-    const inserted: string[] = [];
+    let inserted = 0;
+    let skipped = 0;
 
     for (const event of events) {
       const existing = await ctx.db
@@ -65,12 +66,15 @@ export const appendBatch = mutation({
         .withIndex("by_event_id", (q) => q.eq("eventId", event.eventId))
         .unique();
 
-      if (existing) continue;
+      if (existing) {
+        skipped++;
+        continue;
+      }
 
-      await ctx.db.insert("playbackEvents", { userId, ...event });
-      inserted.push(event.eventId);
+      await ctx.db.insert("playbackEvents", { userId: user._id, ...event });
+      inserted++;
     }
 
-    return { inserted: inserted.length, skipped: events.length - inserted.length };
+    return { inserted, skipped };
   },
 });

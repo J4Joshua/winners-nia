@@ -146,6 +146,7 @@ def compute_user_features(
     *,
     genre_diversity_score: float | None = None,
     liked_track_ids: list[str] | None = None,
+    playlists: list[dict] | None = None,
 ) -> dict:
     valid_af = [af for af in audio_features if af and af.get("danceability") is not None]
 
@@ -261,6 +262,7 @@ def compute_user_features(
         "top_track_ids": top_track_ids,
         "recent_track_ids": recent_track_ids,
         "liked_track_ids": liked_track_ids or [],
+        "playlists": playlists or [],
         "debug": {
             "mean_danceability": round(mean_danceability, 3),
             "mean_energy": round(mean_energy, 3),
@@ -326,6 +328,11 @@ def fetch_with_token(token: str) -> dict:
     liked_track_ids = fetch_liked_tracks_http(token, limit=2000)
     print(f"  → {len(liked_track_ids)} liked tracks")
 
+    print("Fetching playlists (up to 50, 100 tracks each) ...")
+    playlists = fetch_playlists_http(token, max_playlists=50, tracks_per_playlist=100)
+    total_pl_tracks = sum(len(p["tracks"]) for p in playlists)
+    print(f"  → {len(playlists)} playlists, {total_pl_tracks} tracks total")
+
     return {
         "display_name": display_name,
         "top_tracks": top_tracks,
@@ -333,7 +340,73 @@ def fetch_with_token(token: str) -> dict:
         "recent_tracks": recent_tracks,
         "genre_diversity_score": genre_div,
         "liked_track_ids": liked_track_ids,
+        "playlists": playlists,
     }
+
+
+def fetch_playlists_http(access_token: str, max_playlists: int = 50, tracks_per_playlist: int = 100) -> list[dict]:
+    """
+    Fetch user's own playlists with tracks + dates.
+
+    Returns list of:
+      { "id": str, "name": str, "tracks": [{"track_id": str, "added_at": str}] }
+
+    added_at is ISO-8601 e.g. "2024-03-15T12:00:00Z" — used for recency weighting.
+    """
+    import urllib.error as _ue
+    import urllib.request as _ur
+    import json as _json
+
+    headers = {"Authorization": f"Bearer {access_token}"}
+
+    def _get(url: str) -> dict | None:
+        try:
+            req = _ur.Request(url, headers=headers)
+            with _ur.urlopen(req, timeout=15) as r:
+                return _json.loads(r.read())
+        except (_ue.HTTPError, _ue.URLError, OSError) as exc:
+            print(f"  Warning: {url} → {exc}")
+            return None
+
+    # 1. Fetch user's playlist list
+    playlists = []
+    url: str | None = f"https://api.spotify.com/v1/me/playlists?limit=50"
+    while url and len(playlists) < max_playlists:
+        body = _get(url)
+        if not body:
+            break
+        for item in body.get("items") or []:
+            if item and item.get("id") and item.get("owner"):
+                playlists.append({"id": item["id"], "name": item.get("name", ""), "tracks": []})
+        url = body.get("next")
+    playlists = playlists[:max_playlists]
+
+    # 2. Fetch tracks for each playlist
+    for pl in playlists:
+        track_items = []
+        fields = "items(added_at,track(id)),next"
+        track_url: str | None = (
+            f"https://api.spotify.com/v1/playlists/{pl['id']}/tracks"
+            f"?fields={fields}&limit=100"
+        )
+        while track_url and len(track_items) < tracks_per_playlist:
+            body = _get(track_url)
+            if not body:
+                break
+            for item in body.get("items") or []:
+                if not isinstance(item, dict):
+                    continue
+                track = item.get("track")
+                tid = track.get("id") if isinstance(track, dict) else None
+                if tid:
+                    track_items.append({
+                        "track_id": tid,
+                        "added_at": item.get("added_at", ""),
+                    })
+            track_url = body.get("next")
+        pl["tracks"] = track_items[:tracks_per_playlist]
+
+    return playlists
 
 
 def fetch_liked_tracks_http(access_token: str, limit: int = 2000) -> list[str]:

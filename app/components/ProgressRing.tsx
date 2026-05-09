@@ -35,7 +35,7 @@ export function ProgressRing({
       circumference * (1 - Math.max(0, Math.min(1, progress))),
       { duration: 600, easing: Easing.out(Easing.cubic) }
     );
-  }, [progress]);
+  }, [progress, circumference, dashOffset]);
 
   const animatedProps = useAnimatedProps(() => ({
     strokeDashoffset: dashOffset.value,

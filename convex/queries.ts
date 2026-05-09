@@ -1,12 +1,11 @@
 import { query } from "./_generated/server";
 import { v } from "convex/values";
+import { requireSession } from "./lib/auth";
 
-export const getUser = query({
-  args: { userId: v.id("users") },
-  handler: async (ctx, { userId }) => {
-    const user = await ctx.db.get(userId);
-    if (!user) return null;
-
+export const getMe = query({
+  args: { sessionToken: v.string() },
+  handler: async (ctx, { sessionToken }) => {
+    const user = await requireSession(ctx, sessionToken);
     return {
       _id: user._id,
       spotifyId: user.spotifyId,
@@ -21,33 +20,36 @@ export const getUser = query({
 });
 
 export const getOnboardingJob = query({
-  args: { userId: v.id("users") },
-  handler: async (ctx, { userId }) => {
+  args: { sessionToken: v.string() },
+  handler: async (ctx, { sessionToken }) => {
+    const user = await requireSession(ctx, sessionToken);
     return await ctx.db
       .query("onboardingJobs")
-      .withIndex("by_user", (q) => q.eq("userId", userId))
+      .withIndex("by_user", (q) => q.eq("userId", user._id))
       .order("desc")
       .first();
   },
 });
 
 export const getRecentEvents = query({
-  args: { userId: v.id("users"), limit: v.optional(v.number()) },
-  handler: async (ctx, { userId, limit = 50 }) => {
+  args: { sessionToken: v.string(), limit: v.optional(v.number()) },
+  handler: async (ctx, { sessionToken, limit = 50 }) => {
+    const user = await requireSession(ctx, sessionToken);
     return await ctx.db
       .query("playbackEvents")
-      .withIndex("by_user_and_time", (q) => q.eq("userId", userId))
+      .withIndex("by_user_and_time", (q) => q.eq("userId", user._id))
       .order("desc")
       .take(limit);
   },
 });
 
 export const getUserWeights = query({
-  args: { userId: v.id("users") },
-  handler: async (ctx, { userId }) => {
+  args: { sessionToken: v.string() },
+  handler: async (ctx, { sessionToken }) => {
+    const user = await requireSession(ctx, sessionToken);
     return await ctx.db
       .query("userWeights")
-      .withIndex("by_user", (q) => q.eq("userId", userId))
+      .withIndex("by_user", (q) => q.eq("userId", user._id))
       .order("desc")
       .first();
   },

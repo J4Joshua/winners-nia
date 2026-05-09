@@ -36,8 +36,14 @@ def build_train_parser() -> argparse.ArgumentParser:
                    help="Larger batches = more SupCon positives per step = better training")
     p.add_argument("--lr", type=float, default=3e-4)
     p.add_argument("--weight-decay", type=float, default=1e-2)
-    p.add_argument("--tau", type=float, default=0.07,
-                   help="SupCon temperature (0.07 standard; try 0.05 for tighter clusters)")
+    p.add_argument("--tau", type=float, default=0.15,
+                   help="Initial SupCon temperature — annealed to --tau-end over training")
+    p.add_argument("--tau-end", type=float, default=0.05,
+                   help="Final SupCon temperature (warm→cold annealing helps learn coarse then fine structure)")
+    p.add_argument("--uniformity-weight", type=float, default=0.5,
+                   help="Weight for uniformity loss (Wang & Isola 2020); prevents embedding collapse")
+    p.add_argument("--prototype-weight", type=float, default=0.3,
+                   help="Weight for prototype alignment loss; pulls embeddings toward genre centroids")
     p.add_argument("--noise-std", type=float, default=0.04,
                    help="Gaussian noise std on audio scalar augmentation (0 = disable)")
     p.add_argument("--dropout", type=float, default=0.15)

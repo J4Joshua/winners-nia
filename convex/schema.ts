@@ -128,12 +128,23 @@ export default defineSchema({
     .index("by_user", ["userId"])
     .index("by_status", ["status"]),
 
+  sessions: defineTable({
+    userId: v.id("users"),
+    token: v.string(),
+    createdAt: v.number(),
+  }).index("by_token", ["token"]),
+
   playlistRequests: defineTable({
     userId: v.id("users"),
     contextSnapshot: v.object({
       hourLocal: v.number(),
       dow: v.number(),
-      locationBucket: v.string(),
+      locationBucket: v.union(
+        v.literal("home"),
+        v.literal("gym"),
+        v.literal("transit"),
+        v.literal("other")
+      ),
       sessionSkipRate: v.number(),
       consecutiveSkips: v.number(),
     }),

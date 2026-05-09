@@ -1,8 +1,8 @@
 import { useEffect } from "react";
-import { useLocalSearchParams, useRouter } from "expo-router";
+import { useRouter } from "expo-router";
 import { useQuery } from "convex/react";
 import { api } from "../convex/_generated/api";
-import type { Id } from "../convex/_generated/dataModel";
+import { useAuth } from "../contexts/AuthContext";
 import { View, Text } from "../src/tw";
 import Animated, {
   useSharedValue,
@@ -20,7 +20,9 @@ const STEPS = [
   { key: "analyzing", label: "Analyzing your taste", icon: "🧠" },
   { key: "training", label: "Training your personal model", icon: "⚡" },
   { key: "ready", label: "You're ready!", icon: "🎉" },
-];
+] as const;
+
+type StepKey = (typeof STEPS)[number]["key"];
 
 function RotatingRing() {
   const rotation = useSharedValue(0);
@@ -31,7 +33,7 @@ function RotatingRing() {
       -1,
       false
     );
-  }, []);
+  }, [rotation]);
 
   const style = useAnimatedStyle(() => ({
     transform: [{ rotate: `${rotation.value}deg` }],
@@ -61,15 +63,15 @@ function StepRow({
   index,
 }: {
   step: (typeof STEPS)[number];
-  currentStatus: string;
+  currentStatus: StepKey | "error";
   index: number;
 }) {
   const stepIndex = STEPS.findIndex((s) => s.key === currentStatus);
   const isDone = index < stepIndex;
   const isActive = index === stepIndex;
-  const isPending = index > stepIndex;
 
   const scale = useSharedValue(1);
+
   useEffect(() => {
     if (isActive) {
       scale.value = withRepeat(
@@ -80,7 +82,7 @@ function StepRow({
     } else {
       scale.value = withSpring(1);
     }
-  }, [isActive]);
+  }, [isActive, scale]);
 
   const style = useAnimatedStyle(() => ({ transform: [{ scale: scale.value }] }));
 
@@ -112,18 +114,18 @@ function StepRow({
           <Text
             className="text-sm font-medium"
             style={{
-              color: isActive ? "#00e87a" : isDone ? "rgba(255,255,255,0.7)" : "rgba(255,255,255,0.35)",
+              color: isActive
+                ? "#00e87a"
+                : isDone
+                ? "rgba(255,255,255,0.7)"
+                : "rgba(255,255,255,0.35)",
             }}
           >
             {step.label}
           </Text>
         </View>
-        {isActive && (
-          <View className="w-2 h-2 rounded-full bg-attune" />
-        )}
-        {isDone && (
-          <Text className="text-attune text-xs font-medium">Done</Text>
-        )}
+        {isActive && <View className="w-2 h-2 rounded-full bg-attune" />}
+        {isDone && <Text className="text-attune text-xs font-medium">Done</Text>}
       </View>
     </Animated.View>
   );
@@ -131,21 +133,20 @@ function StepRow({
 
 export default function OnboardingScreen() {
   const router = useRouter();
-  const { userId } = useLocalSearchParams<{ userId: string }>();
+  const { sessionToken } = useAuth();
 
   const job = useQuery(
     api.queries.getOnboardingJob,
-    userId ? { userId: userId as Id<"users"> } : "skip"
+    sessionToken ? { sessionToken } : "skip"
   );
 
-  const status = job?.status ?? "fetching";
+  const status: StepKey | "error" = (job?.status as StepKey | "error") ?? "fetching";
 
   useEffect(() => {
-    if (status === "ready") {
-      const t = setTimeout(() => router.replace("/(tabs)"), 1500);
-      return () => clearTimeout(t);
-    }
-  }, [status]);
+    if (status !== "ready") return;
+    const t = setTimeout(() => router.replace("/(tabs)"), 1500);
+    return () => clearTimeout(t);
+  }, [status, router]);
 
   return (
     <View className="flex-1 bg-surface-0 px-6 pt-20">
@@ -156,9 +157,7 @@ export default function OnboardingScreen() {
         <View className="relative items-center justify-center w-20 h-20 mb-6">
           <RotatingRing />
           <View className="absolute w-14 h-14 rounded-full bg-surface-2 items-center justify-center">
-            <Text className="text-2xl">
-              {status === "ready" ? "🎉" : "♪"}
-            </Text>
+            <Text className="text-2xl">{status === "ready" ? "🎉" : "♪"}</Text>
           </View>
         </View>
 

@@ -1,9 +1,31 @@
 import { Tabs } from "expo-router";
-import { Platform, PlatformColor } from "react-native";
+import { Image } from "expo-image";
+import { Text } from "react-native";
+import { Platform } from "react-native";
 
 const TINT = "#00e87a";
-const INACTIVE = "rgba(255,255,255,0.4)";
-const BG = Platform.OS === "ios" ? "transparent" : "#111111";
+const INACTIVE = "rgba(255,255,255,0.38)";
+
+interface TabIconProps {
+  sfSymbol: string;
+  fallback: string;
+  color: string;
+  focused: boolean;
+}
+
+function TabIcon({ sfSymbol, fallback, color }: TabIconProps) {
+  if (Platform.OS === "ios") {
+    return (
+      <Image
+        source={`sf:${sfSymbol}`}
+        style={{ width: 24, height: 24 }}
+        tintColor={color}
+        contentFit="contain"
+      />
+    );
+  }
+  return <Text style={{ fontSize: 20, color }}>{fallback}</Text>;
+}
 
 export default function TabsLayout() {
   return (
@@ -13,13 +35,15 @@ export default function TabsLayout() {
         tabBarActiveTintColor: TINT,
         tabBarInactiveTintColor: INACTIVE,
         tabBarStyle: {
-          backgroundColor: BG,
+          backgroundColor:
+            Platform.OS === "ios" ? "rgba(10,10,10,0.94)" : "#111111",
           borderTopColor: "rgba(255,255,255,0.08)",
           borderTopWidth: 0.5,
         },
         tabBarLabelStyle: {
           fontSize: 10,
           fontFamily: Platform.OS === "ios" ? "ui-rounded" : undefined,
+          fontWeight: "500",
         },
       }}
     >
@@ -27,8 +51,8 @@ export default function TabsLayout() {
         name="index"
         options={{
           title: "Home",
-          tabBarIcon: ({ color, size }) => (
-            <TabIcon glyph="⊙" color={color} size={size} />
+          tabBarIcon: (props) => (
+            <TabIcon {...props} sfSymbol="house.fill" fallback="⌂" />
           ),
         }}
       />
@@ -36,8 +60,8 @@ export default function TabsLayout() {
         name="player"
         options={{
           title: "Now Playing",
-          tabBarIcon: ({ color, size }) => (
-            <TabIcon glyph="♫" color={color} size={size} />
+          tabBarIcon: (props) => (
+            <TabIcon {...props} sfSymbol="music.note" fallback="♫" />
           ),
         }}
       />
@@ -45,16 +69,11 @@ export default function TabsLayout() {
         name="settings"
         options={{
           title: "Settings",
-          tabBarIcon: ({ color, size }) => (
-            <TabIcon glyph="⚙" color={color} size={size} />
+          tabBarIcon: (props) => (
+            <TabIcon {...props} sfSymbol="gearshape.fill" fallback="⚙" />
           ),
         }}
       />
     </Tabs>
   );
-}
-
-function TabIcon({ glyph, color, size }: { glyph: string; color: string; size: number }) {
-  const { Text } = require("react-native");
-  return <Text style={{ fontSize: size - 4, color }}>{glyph}</Text>;
 }

@@ -1,4 +1,4 @@
-"""Song Tower: MLP 45 → 512 → 256 → 128, L2-normalized embedding.
+"""Song Tower: residual MLP 45 → 512 ⊕ res → 256 → 128, L2-normalized.
 
 Input layout (45-d):
   [0:12]  key one-hot (12 semitones)
@@ -7,9 +7,11 @@ Input layout (45-d):
            mode, explicit, popularity_norm, duration_norm, time_sig_norm)
   [26:45] 19-d macro-genre one-hot
 
-Training uses Supervised Contrastive Loss (SupCon) — all same-genre tracks in
-a batch are treated as positives. Two augmented views are generated per sample
-(Gaussian noise on audio scalars + dropout) to further enrich the signal.
+Training:
+  SupCon   — all same-genre in batch are positives (two augmented views)
+  Uniformity — spreads embeddings across the hypersphere (Wang & Isola 2020)
+  Prototype  — pulls embeddings toward their per-genre centroid (alignment)
+  τ-anneal   — temperature 0.15→0.05 over training (coarse then fine structure)
 """
 
 import torch
@@ -25,28 +27,57 @@ _AUDIO_START = 12   # first audio scalar index
 _AUDIO_END   = 26   # first genre one-hot index
 
 
+class _ResidualBlock(nn.Module):
+    """
+    Pre-activation residual block: x → BN → GELU → Linear → BN → GELU → Linear → + x
+
+    Residual connections allow deeper effective training — gradients flow directly
+    to early layers, preventing the vanishing gradient problem that flat MLPs suffer
+    beyond 3 layers.
+    """
+
+    def __init__(self, dim: int, dropout: float) -> None:
+        super().__init__()
+        self.block = nn.Sequential(
+            nn.BatchNorm1d(dim),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(dim, dim, bias=False),
+            nn.BatchNorm1d(dim),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(dim, dim, bias=False),
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return x + self.block(x)
+
+
 class SongTower(nn.Module):
     """
     Maps a 45-d song feature vector to a 128-d L2-normalized embedding.
 
-    Architecture: 45 → 512 (BN+ReLU+Drop) → 256 (BN+ReLU+Drop) → 128 → L2-norm
+    Architecture:
+      45 → Linear(512) → ResidualBlock(512) → ResidualBlock(512)
+         → Linear(256) → GELU → Linear(128) → L2-norm
 
-    BatchNorm stabilises training with mixed feature types (sparse one-hot +
-    dense audio scalars). Dropout + Gaussian input noise create two distinct
-    augmented views from the same raw features, which SupCon exploits.
+    Two residual blocks give effective depth-5 behaviour with the gradient flow
+    of a depth-2 network — key for stable training on mixed sparse+dense inputs.
     """
 
     def __init__(self, dropout: float = 0.15) -> None:
         super().__init__()
-        self.net = nn.Sequential(
+        self.proj_in = nn.Sequential(
             nn.Linear(SONG_FEATURE_DIM, 512),
             nn.BatchNorm1d(512),
-            nn.ReLU(),
+            nn.GELU(),
+        )
+        self.res1 = _ResidualBlock(512, dropout)
+        self.res2 = _ResidualBlock(512, dropout)
+        self.proj_out = nn.Sequential(
             nn.Dropout(dropout),
             nn.Linear(512, 256),
-            nn.BatchNorm1d(256),
-            nn.ReLU(),
-            nn.Dropout(dropout),
+            nn.GELU(),
             nn.Linear(256, EMBEDDING_DIM),
         )
         self._init_weights()
@@ -54,11 +85,15 @@ class SongTower(nn.Module):
     def _init_weights(self) -> None:
         for m in self.modules():
             if isinstance(m, nn.Linear):
-                nn.init.kaiming_normal_(m.weight, nonlinearity="relu")
-                nn.init.zeros_(m.bias)
+                nn.init.kaiming_normal_(m.weight, nonlinearity="linear")
+                if m.bias is not None:
+                    nn.init.zeros_(m.bias)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return F.normalize(self.net(x), dim=-1)
+        h = self.proj_in(x)
+        h = self.res1(h)
+        h = self.res2(h)
+        return F.normalize(self.proj_out(h), dim=-1)
 
     def embed(self, x: torch.Tensor) -> torch.Tensor:
         """Inference-time embedding (eval mode, no dropout / batch noise)."""
@@ -135,6 +170,52 @@ def supcon_loss(
     per_anchor = -(log_prob * pos_mask.float()).sum(dim=1)  # (N,)
     per_anchor = per_anchor[valid] / n_pos[valid]
     return per_anchor.mean()
+
+
+def prototype_alignment_loss(z: torch.Tensor, labels: torch.Tensor) -> torch.Tensor:
+    """
+    Prototype alignment loss: pull each embedding toward its genre centroid.
+
+    For each genre, compute the mean embedding (prototype) from the current batch.
+    Then minimize cosine distance from each sample to its prototype.
+
+    This complements SupCon (which repels wrong-genre pairs) by explicitly
+    anchoring each genre cluster around a stable centroid, reducing intra-genre
+    variance and making the embedding space more organised.
+
+    Combined loss: L = SupCon + 0.5·Uniformity + 0.3·Prototype
+    """
+    device = z.device
+    unique_labels = labels.unique()
+    total_loss = torch.tensor(0.0, device=device)
+    count = 0
+
+    for lbl in unique_labels:
+        mask = labels == lbl
+        if mask.sum() < 2:
+            continue
+        prototype = F.normalize(z[mask].mean(0, keepdim=True), dim=-1)  # (1, D)
+        # cosine distance = 1 - cosine_similarity (z is already L2-normalised)
+        total_loss = total_loss + (1.0 - (z[mask] * prototype).sum(dim=-1)).mean()
+        count += 1
+
+    return total_loss / max(1, count)
+
+
+def uniformity_loss(z: torch.Tensor, t: float = 2.0) -> torch.Tensor:
+    """
+    Uniformity loss (Wang & Isola 2020).
+
+    Encourages embeddings to spread uniformly over the hypersphere, preventing
+    mode collapse where all embeddings cluster in a small region.
+
+    loss = log E[exp(-t * ||z_i - z_j||²)]   (lower = more uniform)
+
+    Combined with SupCon: total_loss = supcon + λ * uniformity
+    Typical λ = 0.5-1.0. Larger λ = more spread, potentially less genre clustering.
+    """
+    sq_dists = torch.cdist(z, z, p=2).pow(2)   # (N, N)
+    return torch.log(torch.exp(-t * sq_dists).mean() + 1e-9)
 
 
 def info_nce_loss(

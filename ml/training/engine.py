@@ -14,7 +14,10 @@ import torch
 import torch.nn as nn
 from torch.utils.data import ConcatDataset, DataLoader
 
-from ml.models.song_tower import SongTower, augment_features, supcon_loss
+from ml.models.song_tower import (
+    SongTower, augment_features, supcon_loss,
+    uniformity_loss, prototype_alignment_loss,
+)
 from ml.training.dataset import SpotifyTracksDataset, load_spotify_dataset
 from ml.export.push_to_hub import push_song_tower
 
@@ -62,17 +65,20 @@ def train_one_epoch(
     tau: float,
     use_amp: bool,
     noise_std: float = 0.04,
+    uniformity_weight: float = 0.5,
+    prototype_weight: float = 0.3,
 ) -> float:
     """
-    SupCon training with two augmented views per sample.
+    Triple-objective training: SupCon + Uniformity + Prototype alignment.
 
-    For each batch (x, genre_labels):
-      - view1 = model(augment(x))          — noisy audio scalars + dropout
-      - view2 = model(augment(x))          — different noise + dropout
-      - concat both views, repeat labels
-      - SupCon loss: all same-genre pairs in the 2B-sample batch are positives
+    Loss = SupCon(v1‖v2, labels×2, τ)    — genre cluster separation
+         + λ_u · Uniformity(v1‖v2)        — spread over hypersphere
+         + λ_p · Prototype(v1, labels)     — pull toward genre centroid
 
-    With batch_size=512 and 19 genres, each anchor has ~50 positives on average.
+    SupCon:    genres cluster; two-view augmentation adds robustness
+    Uniformity: prevents mode collapse (Wang & Isola 2020)
+    Prototype:  stabilizes intra-genre structure, reduces cluster variance
+    τ-anneal:   τ starts high (easy: coarse genre structure) → low (fine: subtle differences)
     """
     model.train()
     total_loss = 0.0
@@ -84,13 +90,14 @@ def train_one_epoch(
         optimizer.zero_grad(set_to_none=True)
 
         with torch.amp.autocast("cuda", enabled=use_amp):
-            # Two independently augmented views (different noise + dropout)
             v1 = model(augment_features(x, noise_std))
             v2 = model(augment_features(x, noise_std))
-            # Concatenate both views; labels repeat to match
-            z = torch.cat([v1, v2], dim=0)
-            labels_2x = torch.cat([genre_labels, genre_labels], dim=0)
-            loss = supcon_loss(z, labels_2x, temperature=tau)
+            z          = torch.cat([v1, v2], dim=0)
+            labels_2x  = torch.cat([genre_labels, genre_labels], dim=0)
+            loss_supcon    = supcon_loss(z, labels_2x, temperature=tau)
+            loss_uni       = uniformity_loss(z)
+            loss_proto     = prototype_alignment_loss(v1, genre_labels)
+            loss = loss_supcon + uniformity_weight * loss_uni + prototype_weight * loss_proto
 
         scaler.scale(loss).backward()
         scaler.unscale_(optimizer)
@@ -303,22 +310,33 @@ def run_training(args: Namespace) -> None:
             print(f"Resumed from {resume_path} at epoch {start_epoch}")
 
     print(f"\nTraining for {args.epochs} epochs (resuming from {start_epoch})...\n")
-    print(f"{'Epoch':>6}  {'Train Loss':>12}  {'Val Loss':>10}  {'LR':>10}  {'Time':>8}")
-    print("─" * 56)
+    print(f"{'Epoch':>6}  {'Train Loss':>12}  {'Val Loss':>10}  {'τ':>7}  {'LR':>8}  {'Time':>6}")
+    print("─" * 62)
+
+    tau_start = getattr(args, "tau",     0.15)
+    tau_end   = getattr(args, "tau_end", 0.05)
+    uni_w     = getattr(args, "uniformity_weight", 0.5)
 
     for epoch in range(start_epoch, args.epochs):
         t0 = time.time()
 
+        # Cosine temperature annealing: warm start (coarse genre clusters) → cool end (fine-grained)
+        progress = (epoch - start_epoch) / max(1, args.epochs - 1)
+        tau = tau_end + 0.5 * (tau_start - tau_end) * (1.0 + math.cos(math.pi * progress))
+
         train_loss = train_one_epoch(
-            model, train_loader, optimizer, scheduler, scaler, device, args.tau, use_amp,
+            model, train_loader, optimizer, scheduler, scaler, device, tau, use_amp,
             noise_std=getattr(args, "noise_std", 0.04),
+            uniformity_weight=uni_w,
+            prototype_weight=getattr(args, "prototype_weight", 0.3),
         )
-        val_loss = evaluate(model, val_loader, device, args.tau, use_amp)
+        val_loss = evaluate(model, val_loader, device, tau, use_amp)
 
         current_lr = scheduler.get_last_lr()[0]
         elapsed = time.time() - t0
         print(
-            f"{epoch + 1:>6}  {train_loss:>12.4f}  {val_loss:>10.4f}  {current_lr:>10.2e}  {elapsed:>7.1f}s"
+            f"{epoch + 1:>6}  {train_loss:>12.4f}  {val_loss:>10.4f}"
+            f"  τ={tau:.3f}  {current_lr:>8.2e}  {elapsed:>6.1f}s"
         )
 
         if (epoch + 1) % args.checkpoint_every == 0:

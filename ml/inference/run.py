@@ -51,6 +51,7 @@ def run_inference(args: Namespace) -> None:
         ids,
         top_k=top_k,
         faiss_index_path=getattr(args, "faiss_index", None),
+        names=names,
     )
     search_ms = (time.perf_counter() - t0) * 1000
 
