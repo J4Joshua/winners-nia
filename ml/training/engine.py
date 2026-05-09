@@ -190,8 +190,13 @@ def export_embeddings(
 def export_torchscript(model: nn.Module, output_dir: Path, device: torch.device) -> Path:
     inner = _unwrap_for_export(model)
     inner.eval()
+    # Warm up torch.compile once here at export time (single forward, no CUDAGraph issue).
+    if hasattr(torch, "compile"):
+        inner = torch.compile(inner, mode="reduce-overhead")  # type: ignore[assignment]
     example = torch.zeros(1, 26, device=device)
-    scripted = torch.jit.trace(inner, example)
+    with torch.no_grad():
+        inner(example)  # trigger compile
+    scripted = torch.jit.trace(_unwrap_for_export(inner), example)
     out_path = output_dir / "song_tower_v1.pt"
     scripted.save(str(out_path))
     print(f"TorchScript saved → {out_path}")
@@ -239,13 +244,13 @@ def run_training(args: Namespace) -> None:
     total_params = sum(p.numel() for p in model.parameters())
     print(f"Model parameters: {total_params:,}")
 
-    if args.compile and hasattr(torch, "compile"):
-        # CUDAGraphs alias output buffers across invocations; InfoNCE calls model(x) twice per batch
-        # which triggers the overwrite error. Disabling CUDAGraphs in the inductor is the only
-        # reliable fix — compile still runs Triton kernels and gives most of the speedup.
-        print("Compiling model with torch.compile (cudagraphs disabled)...")
-        torch._dynamo.config.suppress_errors = False  # type: ignore[attr-defined]
-        model = torch.compile(model, mode="default", options={"triton.cudagraphs": False})
+    # torch.compile is intentionally skipped during training.
+    # InfoNCE calls model(x) twice per batch; torch.compile with CUDAGraphs aliases the two
+    # output buffers, causing "tensor output of CUDAGraphs overwritten" on any PyTorch build.
+    # For a 26→256→128 MLP the kernel overhead is negligible — AMP + H100 is already fast.
+    # Compile is applied to the unwrapped model at export time (export_torchscript).
+    if args.compile:
+        print("Note: --compile is ignored during training (applied at export). See engine.py.")
 
     optimizer = torch.optim.AdamW(
         model.parameters(),
