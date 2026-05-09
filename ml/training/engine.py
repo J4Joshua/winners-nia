@@ -51,14 +51,6 @@ def _unwrap_for_export(model: nn.Module) -> nn.Module:
     return model
 
 
-def _cudagraph_mark_step() -> None:
-    """Separate CUDAGraph steps when torch.compile runs twice per batch (two dropout views)."""
-    if not torch.cuda.is_available():
-        return
-    fn = getattr(torch.compiler, "cudagraph_mark_step_begin", None)
-    if callable(fn):
-        fn()
-
 
 def train_one_epoch(
     model: nn.Module,
@@ -78,10 +70,8 @@ def train_one_epoch(
         optimizer.zero_grad(set_to_none=True)
 
         with torch.amp.autocast("cuda", enabled=use_amp):
-            _cudagraph_mark_step()
-            anchor = model(x).clone()
-            _cudagraph_mark_step()
-            positive = model(x).clone()
+            anchor = model(x)
+            positive = model(x)
             loss = info_nce_loss(anchor, positive, temperature=tau)
 
         scaler.scale(loss).backward()
@@ -110,10 +100,8 @@ def evaluate(
     for x, _ in loader:
         x = x.to(device, non_blocking=True)
         with torch.amp.autocast("cuda", enabled=use_amp):
-            _cudagraph_mark_step()
-            anchor = model(x).clone()
-            _cudagraph_mark_step()
-            positive = model(x).clone()
+            anchor = model(x)
+            positive = model(x)
             loss = info_nce_loss(anchor, positive, temperature=tau)
         total_loss += loss.item()
 
@@ -252,9 +240,12 @@ def run_training(args: Namespace) -> None:
     print(f"Model parameters: {total_params:,}")
 
     if args.compile and hasattr(torch, "compile"):
-        # default: stable with double-forward InfoNCE; reduce-overhead CUDAGraphs can alias buffers.
-        print("Compiling model with torch.compile (mode=default)...")
-        model = torch.compile(model, mode="default")
+        # CUDAGraphs alias output buffers across invocations; InfoNCE calls model(x) twice per batch
+        # which triggers the overwrite error. Disabling CUDAGraphs in the inductor is the only
+        # reliable fix — compile still runs Triton kernels and gives most of the speedup.
+        print("Compiling model with torch.compile (cudagraphs disabled)...")
+        torch._dynamo.config.suppress_errors = False  # type: ignore[attr-defined]
+        model = torch.compile(model, mode="default", options={"triton.cudagraphs": False})
 
     optimizer = torch.optim.AdamW(
         model.parameters(),
