@@ -10,4 +10,6 @@ Spotify-backed mobile app: per-user playlists (known + discovery) using embeddin
 
 **Legal** — [Spotify policy](https://developer.spotify.com/policy) / [terms](https://www.spotify.com/legal/end-user-agreement/); HF data has its own license ([dataset card](https://huggingface.co/datasets/maharshipandya/spotify-tracks-dataset)). Align retention and training with both.
 
+**Plan** — [`docs/superpowers/plans/2026-05-09-attune-implementation-plan.md`](docs/superpowers/plans/2026-05-09-attune-implementation-plan.md). **Stack** — [`docs/decisions/0001-stack.md`](docs/decisions/0001-stack.md). **RunPod Serverless** — [`docs/runpod-serverless.md`](docs/runpod-serverless.md). **Onboarding & learning** — [`docs/product-onboarding-learning.md`](docs/product-onboarding-learning.md).
+
 **Status** — Docs + empty dirs only.
